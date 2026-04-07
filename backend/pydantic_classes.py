@@ -12,53 +12,59 @@ from pydantic import BaseModel, field_validator
 # Classes are defined here
 ############################################
 class CenaCreate(BaseModel):
+    cena: float
+    id: Optional[int] = None
+    status: str
     nacin_placanja: str
     datum_uplate: date
-    id: int
-    cena: float
-    status: str
     sesija_2: int  # N:1 Relationship (mandatory)
     klijent_1: int  # N:1 Relationship (mandatory)
 
 
 class SesijaGrupaCreate(BaseModel):
-    id: int
+    id: Optional[int] = None
     grupa: int  # N:1 Relationship (mandatory)
     sesija_1: int  # N:1 Relationship (mandatory)
 
 
 class SesijaKlijentCreate(BaseModel):
-    id: int
-    sesija: int  # N:1 Relationship (mandatory)
+    id: Optional[int] = None
     klijent: int  # N:1 Relationship (mandatory)
+    sesija: int  # N:1 Relationship (mandatory)
 
 
 class SesijaCreate(BaseModel):
-    id: int
-    pocetak: datetime
-    cena: float
+    cena: float                                      # float column - price of session
     status: str
+    id: Optional[int] = None
+    pocetak: datetime
+    klijent_id: Optional[int] = None                 # For individual sessions
+    grupa_id: Optional[int] = None                   # For group sessions
     kraj: datetime
-    sesijaklijent_1: Optional[List[int]] = None  # 1:N Relationship
-    cena: Optional[List[int]] = None  # 1:N Relationship
-    sesijagrupa_1: Optional[List[int]] = None  # 1:N Relationship
+    uplate: Optional[List[int]] = None               # 1:N Relationship to Cena
+    sesijaklijent_1: Optional[List[int]] = None      # 1:N Relationship
+    sesijagrupa_1: Optional[List[int]] = None        # 1:N Relationship
 
 
 class GrupaCreate(BaseModel):
-    naziv: str
+    opis: Optional[str] = None
+    id: Optional[int] = None
     cena: float
-    opis: str
-    id: int
-    sesijagrupa: Optional[List[int]] = None  # 1:N Relationship
+    naziv: str
+    sesijagrupa: Optional[List[int]] = None          # 1:N Relationship
+    clanovi: Optional[List[int]] = None              # List of klijent IDs who are members of this group
 
 
 class KlijentCreate(BaseModel):
-    id: int
     ime: str
+    email: Optional[str] = None                      # Optional - if provided, client gets email notifications
+    id: Optional[int] = None                         # Optional - auto-increment
     prezime: str
-    email: str
-    broj_telefona: str
-    cena_1: Optional[List[int]] = None  # 1:N Relationship
-    sesijaklijent: Optional[List[int]] = None  # 1:N Relationship
+    broj_telefona: Optional[str] = None              # Optional
+    sesijaklijent: Optional[List[int]] = None        # 1:N Relationship
+    cena_1: Optional[List[int]] = None               # 1:N Relationship
 
 
+class GrupaKlijentCreate(BaseModel):
+    grupa_id: Optional[int] = None
+    klijent_id: Optional[int] = None
