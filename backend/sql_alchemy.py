@@ -151,15 +151,15 @@ class GrupaKlijent(Base):
     klijent = relationship("Klijent", back_populates="grupa_clanstva")
 
 
-############################################
-# Database Connection
-############################################
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./Class_Diagram.db"
-)
-
-engine = create_engine(DATABASE_URL, echo=True)
-
-Base.metadata.create_all(engine)
+# ############################################
+# # Database Connection
+# ############################################
+#
+# DATABASE_URL = os.getenv(
+#     "DATABASE_URL",
+#     "sqlite:///./Class_Diagram.db"
+# )
+#
+# engine = create_engine(DATABASE_URL, echo=True)
+#
+# Base.metadata.create_all(engine)
