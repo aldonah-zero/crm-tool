@@ -1,108 +1,165 @@
+import os
 import enum
 from typing import List, Optional
 from sqlalchemy import (
-    create_engine, Column, ForeignKey, Table, Text, Boolean, String, Date, 
-    Time, DateTime, Float, Integer, Enum
+    create_engine, ForeignKey, String, Date, DateTime,
+    Float, Integer
 )
 from sqlalchemy.orm import (
-    column_property, DeclarativeBase, Mapped, mapped_column, relationship
+    DeclarativeBase, Mapped, mapped_column, relationship
 )
-from datetime import datetime as dt_datetime, time as dt_time, date as dt_date
+from datetime import datetime as dt_datetime, date as dt_date
+
+
+############################################
+# Base
+############################################
 
 class Base(DeclarativeBase):
     pass
 
 
+############################################
+# Tenant
+############################################
 
-# Tables definition for many-to-many relationships
+class Tenant(Base):
+    __tablename__ = "tenant"
 
-# Tables definition
-class Cena(Base):
-    __tablename__ = "cena"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    cena: Mapped[float] = mapped_column(Float)
-    datum_uplate: Mapped[dt_date] = mapped_column(Date)
-    nacin_placanja: Mapped[str] = mapped_column(String(100))
-    status: Mapped[str] = mapped_column(String(100))
-    sesija_2_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
-    klijent_1_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
+    name: Mapped[str] = mapped_column(String(100))
 
-class SesijaGrupa(Base):
-    __tablename__ = "sesijagrupa"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    grupa_id: Mapped[int] = mapped_column(ForeignKey("grupa.id"))
-    sesija_1_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
+    klijenti = relationship("Klijent", backref="tenant")
+    grupe = relationship("Grupa", backref="tenant")
+    sesije = relationship("Sesija", backref="tenant")
+    cene = relationship("Cena", backref="tenant")
 
-class SesijaKlijent(Base):
-    __tablename__ = "sesijaklijent"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    klijent_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
-    sesija_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
 
-class Sesija(Base):
-    __tablename__ = "sesija"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    pocetak: Mapped[dt_datetime] = mapped_column(DateTime)
-    kraj: Mapped[dt_datetime] = mapped_column(DateTime)
-    cena: Mapped[float] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(100))
-
-class Grupa(Base):
-    __tablename__ = "grupa"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    naziv: Mapped[str] = mapped_column(String(100))
-    opis: Mapped[str] = mapped_column(String(100))
-    cena: Mapped[float] = mapped_column(Float)
+############################################
+# Core Tables
+############################################
 
 class Klijent(Base):
     __tablename__ = "klijent"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
     ime: Mapped[str] = mapped_column(String(100))
     prezime: Mapped[str] = mapped_column(String(100))
     broj_telefona: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    sesijaklijent = relationship("SesijaKlijent", back_populates="klijent")
+    cena_1 = relationship("Cena", back_populates="klijent_1")
+    grupa_clanstva = relationship("GrupaKlijent", back_populates="klijent")
+
+
+class Grupa(Base):
+    __tablename__ = "grupa"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    naziv: Mapped[str] = mapped_column(String(100))
+    opis: Mapped[str] = mapped_column(String(255))
+    cena: Mapped[float] = mapped_column(Float)
+
+    sesijagrupa = relationship("SesijaGrupa", back_populates="grupa")
+    grupa_clanovi = relationship("GrupaKlijent", back_populates="grupa")
+
+
+class Sesija(Base):
+    __tablename__ = "sesija"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    pocetak: Mapped[dt_datetime] = mapped_column(DateTime)
+    kraj: Mapped[dt_datetime] = mapped_column(DateTime)
+
+    cena: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(100))
+
+    uplate = relationship("Cena", back_populates="sesija_2")
+    sesijaklijent_1 = relationship("SesijaKlijent", back_populates="sesija")
+    sesijagrupa_1 = relationship("SesijaGrupa", back_populates="sesija_1")
+
+
+############################################
+# Payments
+############################################
+
+class Cena(Base):
+    __tablename__ = "cena"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    cena: Mapped[float] = mapped_column(Float)
+    datum_uplate: Mapped[dt_date] = mapped_column(Date)
+    nacin_placanja: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(100))
+
+    sesija_2_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
+    klijent_1_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
+
+    sesija_2 = relationship("Sesija", back_populates="uplate")
+    klijent_1 = relationship("Klijent", back_populates="cena_1")
+
+
+############################################
+# Relationship Tables
+############################################
+
+class SesijaKlijent(Base):
+    __tablename__ = "sesijaklijent"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    klijent_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
+    sesija_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
+
+    klijent = relationship("Klijent", back_populates="sesijaklijent")
+    sesija = relationship("Sesija", back_populates="sesijaklijent_1")
+
+
+class SesijaGrupa(Base):
+    __tablename__ = "sesijagrupa"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    grupa_id: Mapped[int] = mapped_column(ForeignKey("grupa.id"))
+    sesija_1_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
+
+    grupa = relationship("Grupa", back_populates="sesijagrupa")
+    sesija_1 = relationship("Sesija", back_populates="sesijagrupa_1")
+
+
 class GrupaKlijent(Base):
     __tablename__ = "grupaklijent"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    grupa_id: Mapped[int] = mapped_column(ForeignKey("grupa.id"), nullable=False)
-    klijent_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+
+    grupa_id: Mapped[int] = mapped_column(ForeignKey("grupa.id"))
+    klijent_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
+
+    grupa = relationship("Grupa", back_populates="grupa_clanovi")
+    klijent = relationship("Klijent", back_populates="grupa_clanstva")
 
 
+############################################
+# Database Connection
+############################################
 
-#--- Relationships of the cena table
-Cena.sesija_2: Mapped["Sesija"] = relationship("Sesija", back_populates="uplate", foreign_keys=[Cena.sesija_2_id])
-Cena.klijent_1: Mapped["Klijent"] = relationship("Klijent", back_populates="cena_1", foreign_keys=[Cena.klijent_1_id])
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///./Class_Diagram.db"
+)
 
-#--- Relationships of the sesijagrupa table
-SesijaGrupa.grupa: Mapped["Grupa"] = relationship("Grupa", back_populates="sesijagrupa", foreign_keys=[SesijaGrupa.grupa_id])
-SesijaGrupa.sesija_1: Mapped["Sesija"] = relationship("Sesija", back_populates="sesijagrupa_1", foreign_keys=[SesijaGrupa.sesija_1_id])
-
-#--- Relationships of the sesijaklijent table
-SesijaKlijent.klijent: Mapped["Klijent"] = relationship("Klijent", back_populates="sesijaklijent", foreign_keys=[SesijaKlijent.klijent_id])
-SesijaKlijent.sesija: Mapped["Sesija"] = relationship("Sesija", back_populates="sesijaklijent_1", foreign_keys=[SesijaKlijent.sesija_id])
-
-#--- Relationships of the sesija table
-Sesija.uplate: Mapped[List["Cena"]] = relationship("Cena", back_populates="sesija_2", foreign_keys=[Cena.sesija_2_id], cascade="all, delete-orphan")
-Sesija.sesijaklijent_1: Mapped[List["SesijaKlijent"]] = relationship("SesijaKlijent", back_populates="sesija", foreign_keys=[SesijaKlijent.sesija_id], cascade="all, delete-orphan")
-Sesija.sesijagrupa_1: Mapped[List["SesijaGrupa"]] = relationship("SesijaGrupa", back_populates="sesija_1", foreign_keys=[SesijaGrupa.sesija_1_id], cascade="all, delete-orphan")
-
-#--- Relationships of the grupa table
-Grupa.sesijagrupa: Mapped[List["SesijaGrupa"]] = relationship("SesijaGrupa", back_populates="grupa", foreign_keys=[SesijaGrupa.grupa_id], cascade="all, delete-orphan")
-Grupa.grupa_clanovi: Mapped[List["GrupaKlijent"]] = relationship("GrupaKlijent", back_populates="grupa", foreign_keys=[GrupaKlijent.grupa_id], cascade="all, delete-orphan")
-
-#--- Relationships of the klijent table
-Klijent.sesijaklijent: Mapped[List["SesijaKlijent"]] = relationship("SesijaKlijent", back_populates="klijent", foreign_keys=[SesijaKlijent.klijent_id], cascade="all, delete-orphan")
-Klijent.cena_1: Mapped[List["Cena"]] = relationship("Cena", back_populates="klijent_1", foreign_keys=[Cena.klijent_1_id], cascade="all, delete-orphan")
-Klijent.grupa_clanstva: Mapped[List["GrupaKlijent"]] = relationship("GrupaKlijent", back_populates="klijent", foreign_keys=[GrupaKlijent.klijent_id], cascade="all, delete-orphan")
-
-#--- Relationships of the grupaklijent table
-GrupaKlijent.grupa: Mapped["Grupa"] = relationship("Grupa", back_populates="grupa_clanovi", foreign_keys=[GrupaKlijent.grupa_id])
-GrupaKlijent.klijent: Mapped["Klijent"] = relationship("Klijent", back_populates="grupa_clanstva", foreign_keys=[GrupaKlijent.klijent_id])
-
-# Database connection
-DATABASE_URL = "sqlite:///Class_Diagram.db"  # SQLite connection
 engine = create_engine(DATABASE_URL, echo=True)
 
-# Create tables in the database
-Base.metadata.create_all(engine, checkfirst=True)
+Base.metadata.create_all(engine)
