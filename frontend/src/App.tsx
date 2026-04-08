@@ -5,7 +5,7 @@ import AdminPanel from "./pages/AdminPanel";
 import Calendar from "./pages/Calendar";
 import AuthPage from "./pages/AuthPage";
 import "./App.css";
-import "./styles/auth.css";
+import "./pages/Auth.css";
 
 // ============================================
 // Main app content (shown when authenticated)
