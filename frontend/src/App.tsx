@@ -3,7 +3,9 @@ import { TableProvider } from "./contexts/TableContext";
 import AdminPanel from "./pages/AdminPanel";
 import Calendar from "./pages/Calendar";
 import "./App.css";
+import axios from "axios";
 
+axios.defaults.headers.common["X-Tenant-ID"] = "1";
 function App() {
   const [activePage, setActivePage] = useState<"admin" | "calendar">("admin");
   const [sidebarOpen, setSidebarOpen] = useState(false);
