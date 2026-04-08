@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { TableProvider } from "./contexts/TableContext";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import AdminPanel from "./pages/AdminPanel";
 import Calendar from "./pages/Calendar";
+import AuthPage from "./pages/AuthPage";
 import "./App.css";
-import axios from "axios";
+import "./styles/auth.css";
 
-axios.defaults.headers.common["X-Tenant-ID"] = "1";
-function App() {
+// ============================================
+// Main app content (shown when authenticated)
+// ============================================
+const AppContent: React.FC = () => {
+  const { user, profile, loading, signOut } = useAuth();
   const [activePage, setActivePage] = useState<"admin" | "calendar">("admin");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -23,6 +28,57 @@ function App() {
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
+  // Show loading spinner while checking auth
+  if (loading) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minHeight: "100vh",
+          background: "#0f172a",
+        }}
+      >
+        <svg width="44" height="44" viewBox="0 0 44 44">
+          <circle
+            cx="22"
+            cy="22"
+            r="18"
+            fill="none"
+            stroke="#1e293b"
+            strokeWidth="3.5"
+          />
+          <circle
+            cx="22"
+            cy="22"
+            r="18"
+            fill="none"
+            stroke="#6366f1"
+            strokeWidth="3.5"
+            strokeDasharray="80 33"
+            strokeLinecap="round"
+          >
+            <animateTransform
+              attributeName="transform"
+              type="rotate"
+              from="0 22 22"
+              to="360 22 22"
+              dur="0.7s"
+              repeatCount="indefinite"
+            />
+          </circle>
+        </svg>
+      </div>
+    );
+  }
+
+  // Not logged in — show auth page
+  if (!user || !profile) {
+    return <AuthPage />;
+  }
+
+  // Logged in — show app
   const handleNavClick = (page: "admin" | "calendar") => {
     setActivePage(page);
     if (isMobile) setSidebarOpen(false);
@@ -101,7 +157,7 @@ function App() {
             </div>
             <div>
               <h1 className="psych-logo-text">PsihoApp</h1>
-              <p className="psych-logo-sub">Upravljanje praksom</p>
+              <p className="psych-logo-sub">{profile.tenant_name}</p>
             </div>
             {isMobile && (
               <button
@@ -169,8 +225,107 @@ function App() {
             </button>
           </div>
 
+          {/* User info at bottom */}
           <div className="psych-sidebar-footer">
-            <p>© 2026 PsihoApp</p>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                marginBottom: "12px",
+                padding: "0 4px",
+              }}
+            >
+              <div
+                style={{
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  background: "linear-gradient(135deg, #6366f1, #7c3aed)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "#fff",
+                  fontSize: "13px",
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                {(profile.full_name || profile.email || "U")
+                  .charAt(0)
+                  .toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    color: "#e2e8f0",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {profile.full_name || profile.email}
+                </div>
+                <div
+                  style={{
+                    fontSize: "11px",
+                    color: "#64748b",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {profile.role === "owner" ? "Vlasnik" : "Član"} ·{" "}
+                  {profile.email}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={signOut}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #334155",
+                borderRadius: "8px",
+                background: "transparent",
+                color: "#94a3b8",
+                fontSize: "13px",
+                fontWeight: 500,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                transition: "all 0.2s",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "6px",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "#1e293b";
+                e.currentTarget.style.color = "#e2e8f0";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "#94a3b8";
+              }}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              Odjavi se
+            </button>
           </div>
         </nav>
 
@@ -181,6 +336,17 @@ function App() {
         </main>
       </div>
     </TableProvider>
+  );
+};
+
+// ============================================
+// Root App with AuthProvider
+// ============================================
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

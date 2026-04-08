@@ -2350,6 +2350,155 @@ def delete_klijent(
 
 
 ############################################
+#
+#   Auth / User Profile endpoints
+#   (paste this into main_api.py before `if __name__ == "__main__":`)
+#
+############################################
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class RegisterProfileRequest(PydanticBaseModel):
+    supabase_user_id: str
+    email: str
+    full_name: str | None = None
+    practice_name: str
+
+
+class LoginProfileRequest(PydanticBaseModel):
+    supabase_user_id: str
+
+
+class JoinTenantRequest(PydanticBaseModel):
+    supabase_user_id: str
+    email: str
+    full_name: str | None = None
+    tenant_id: int
+
+
+@app.post("/auth/register-profile", tags=["Auth"])
+def register_profile(
+        data: RegisterProfileRequest,
+        database: Session = Depends(get_db)
+):
+    """After Supabase signup, create a new tenant + user_profile."""
+    existing = database.query(UserProfile).filter(
+        UserProfile.supabase_user_id == data.supabase_user_id
+    ).first()
+
+    if existing:
+        tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
+        return {
+            "user_id": existing.id,
+            "supabase_user_id": existing.supabase_user_id,
+            "email": existing.email,
+            "full_name": existing.full_name,
+            "role": existing.role,
+            "tenant_id": existing.tenant_id,
+            "tenant_name": tenant.name if tenant else ""
+        }
+
+    new_tenant = Tenant(name=data.practice_name)
+    database.add(new_tenant)
+    database.flush()
+
+    new_profile = UserProfile(
+        supabase_user_id=data.supabase_user_id,
+        email=data.email,
+        full_name=data.full_name,
+        role="owner",
+        tenant_id=new_tenant.id
+    )
+    database.add(new_profile)
+    database.commit()
+    database.refresh(new_profile)
+
+    return {
+        "user_id": new_profile.id,
+        "supabase_user_id": new_profile.supabase_user_id,
+        "email": new_profile.email,
+        "full_name": new_profile.full_name,
+        "role": new_profile.role,
+        "tenant_id": new_tenant.id,
+        "tenant_name": new_tenant.name
+    }
+
+
+@app.post("/auth/login-profile", tags=["Auth"])
+def login_profile(
+        data: LoginProfileRequest,
+        database: Session = Depends(get_db)
+):
+    """After Supabase login, look up user_profile and return tenant_id."""
+    profile = database.query(UserProfile).filter(
+        UserProfile.supabase_user_id == data.supabase_user_id
+    ).first()
+
+    if not profile:
+        raise HTTPException(status_code=404, detail="no_profile")
+
+    tenant = database.query(Tenant).filter(Tenant.id == profile.tenant_id).first()
+
+    return {
+        "user_id": profile.id,
+        "supabase_user_id": profile.supabase_user_id,
+        "email": profile.email,
+        "full_name": profile.full_name,
+        "role": profile.role,
+        "tenant_id": profile.tenant_id,
+        "tenant_name": tenant.name if tenant else ""
+    }
+
+
+@app.post("/auth/join-tenant", tags=["Auth"])
+def join_tenant(
+        data: JoinTenantRequest,
+        database: Session = Depends(get_db)
+):
+    """New user joins an existing tenant (invited by owner)."""
+    existing = database.query(UserProfile).filter(
+        UserProfile.supabase_user_id == data.supabase_user_id
+    ).first()
+
+    if existing:
+        tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
+        return {
+            "user_id": existing.id,
+            "supabase_user_id": existing.supabase_user_id,
+            "email": existing.email,
+            "full_name": existing.full_name,
+            "role": existing.role,
+            "tenant_id": existing.tenant_id,
+            "tenant_name": tenant.name if tenant else ""
+        }
+
+    tenant = database.query(Tenant).filter(Tenant.id == data.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    new_profile = UserProfile(
+        supabase_user_id=data.supabase_user_id,
+        email=data.email,
+        full_name=data.full_name,
+        role="member",
+        tenant_id=data.tenant_id
+    )
+    database.add(new_profile)
+    database.commit()
+    database.refresh(new_profile)
+
+    return {
+        "user_id": new_profile.id,
+        "supabase_user_id": new_profile.supabase_user_id,
+        "email": new_profile.email,
+        "full_name": new_profile.full_name,
+        "role": new_profile.role,
+        "tenant_id": new_profile.tenant_id,
+        "tenant_name": tenant.name
+    }
+
+############################################
 # Maintaining the server
 ############################################
 if __name__ == "__main__":

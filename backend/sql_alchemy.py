@@ -1,9 +1,8 @@
 import os
-import enum
 from typing import List, Optional
 from sqlalchemy import (
     create_engine, ForeignKey, String, Date, DateTime,
-    Float, Integer
+    Float, Integer, Boolean, Text
 )
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, mapped_column, relationship
@@ -27,12 +26,32 @@ class Tenant(Base):
     __tablename__ = "tenant"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, default=dt_datetime.utcnow)
 
     klijenti = relationship("Klijent", backref="tenant")
     grupe = relationship("Grupa", backref="tenant")
     sesije = relationship("Sesija", backref="tenant")
     cene = relationship("Cena", backref="tenant")
+    user_profiles = relationship("UserProfile", back_populates="tenant")
+
+
+############################################
+# User Profile (links Supabase Auth → Tenant)
+############################################
+
+class UserProfile(Base):
+    __tablename__ = "user_profile"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    supabase_user_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    role: Mapped[str] = mapped_column(String(50), default="owner")  # owner | member
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+    created_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, default=dt_datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="user_profiles")
 
 
 ############################################
@@ -149,17 +168,3 @@ class GrupaKlijent(Base):
 
     grupa = relationship("Grupa", back_populates="grupa_clanovi")
     klijent = relationship("Klijent", back_populates="grupa_clanstva")
-
-
-# ############################################
-# # Database Connection
-# ############################################
-#
-# DATABASE_URL = os.getenv(
-#     "DATABASE_URL",
-#     "sqlite:///./Class_Diagram.db"
-# )
-#
-# engine = create_engine(DATABASE_URL, echo=True)
-#
-# Base.metadata.create_all(engine)
