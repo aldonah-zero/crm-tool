@@ -2465,8 +2465,21 @@ def login_profile(
     ).first()
 
     if not profile:
-        raise HTTPException(status_code=404, detail="no_profile")
+        tenant = Tenant(name="Default")
+        database.add(tenant)
+        database.flush()
 
+        profile = UserProfile(
+            supabase_user_id=data.supabase_user_id,
+            email=data.email,
+            full_name=data.full_name,
+            role="owner",
+            tenant_id=tenant.id
+        )
+
+        database.add(profile)
+        database.commit()
+        database.refresh(profile)
     tenant = database.query(Tenant).filter(Tenant.id == profile.tenant_id).first()
 
     return {
