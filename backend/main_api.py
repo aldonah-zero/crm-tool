@@ -2401,7 +2401,8 @@ class RegisterProfileRequest(PydanticBaseModel):
 
 class LoginProfileRequest(PydanticBaseModel):
     supabase_user_id: str
-
+    email: str | None = None
+    full_name: str | None = None
 
 class JoinTenantRequest(PydanticBaseModel):
     supabase_user_id: str

@@ -62,10 +62,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Fetch user profile from our backend
   const fetchProfile = useCallback(
-    async (supabaseUserId: string): Promise<UserProfile | null> => {
+    async (user: User): Promise<UserProfile | null> => {
       try {
         const res = await axios.post(`${backendBase}/auth/login-profile`, {
-          supabase_user_id: supabaseUserId,
+          supabase_user_id: user.id,
+          email: user.email,
+          full_name:
+            user.user_metadata?.full_name || user.user_metadata?.name || null,
         });
         return res.data;
       } catch (err: any) {
@@ -96,7 +99,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       setUser(s?.user ?? null);
 
       if (s?.user) {
-        const p = await fetchProfile(s.user.id);
+        const p = await fetchProfile(s.user);
         setProfile(p);
       }
 
@@ -111,7 +114,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       setUser(s?.user ?? null);
 
       if (s?.user) {
-        const p = await fetchProfile(s.user.id);
+        const p = await fetchProfile(s.user);
         setProfile(p);
       } else {
         setProfile(null);
@@ -192,7 +195,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     if (!data.user) return { error: "Prijava neuspešna" };
 
     // Fetch profile
-    const p = await fetchProfile(data.user.id);
+    const p = await fetchProfile(data.user);
     if (!p) {
       return { needsProfile: true };
     }
