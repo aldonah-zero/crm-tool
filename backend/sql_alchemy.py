@@ -121,7 +121,7 @@ class Cena(Base):
     status: Mapped[str] = mapped_column(String(100))
 
     sesija_2_id: Mapped[int] = mapped_column(ForeignKey("sesija.id"))
-    klijent_1_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"))
+    klijent_1_id: Mapped[Optional[int]] = mapped_column(ForeignKey("klijent.id"), nullable=True)
 
     sesija_2 = relationship("Sesija", back_populates="uplate")
     klijent_1 = relationship("Klijent", back_populates="cena_1")
