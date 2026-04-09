@@ -17,6 +17,7 @@ const AuthPage: React.FC = () => {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccessMessage("");
     setLoading(true);
 
     const result = await signIn(email, password);
@@ -33,6 +34,7 @@ const AuthPage: React.FC = () => {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccessMessage("");
 
     if (password.length < 6) {
       setError("Lozinka mora imati najmanje 6 karaktera");
@@ -43,7 +45,12 @@ const AuthPage: React.FC = () => {
 
     const result = await signUp(email, password, fullName, practiceName);
 
-    if (result.error) {
+    if (result.error === "EMAIL_CONFIRMATION_NEEDED") {
+      setSuccessMessage(
+        "Registracija uspešna! Proverite svoj email i potvrdite nalog pre prijavljivanja.",
+      );
+      setError("");
+    } else if (result.error) {
       setError(result.error);
     }
 
@@ -53,6 +60,7 @@ const AuthPage: React.FC = () => {
   const handleSetupPractice = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccessMessage("");
     setLoading(true);
 
     const result = await createProfile(practiceName, fullName || undefined);
@@ -66,11 +74,12 @@ const AuthPage: React.FC = () => {
 
   const handleGoogleLogin = async () => {
     setError("");
+    setSuccessMessage("");
     await signInWithGoogle();
   };
 
   // Setup practice view (shown after Google login if no profile exists)
-  if (view === "setup-practice" || (user && !loading)) {
+  if (view === "setup-practice" || (user && !loading && !successMessage)) {
     if (view === "setup-practice") {
       return (
         <div className="auth-container">
@@ -274,6 +283,7 @@ const AuthPage: React.FC = () => {
                 onClick={() => {
                   setView("register");
                   setError("");
+                  setSuccessMessage("");
                 }}
               >
                 Registrujte se
@@ -287,6 +297,7 @@ const AuthPage: React.FC = () => {
                 onClick={() => {
                   setView("login");
                   setError("");
+                  setSuccessMessage("");
                 }}
               >
                 Prijavite se

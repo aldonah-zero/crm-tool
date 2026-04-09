@@ -139,7 +139,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     if (error) return { error: error.message };
     if (!data.user) return { error: "Registracija neuspešna" };
 
-    // Create tenant + profile on our backend
+    // Check if account already exists (identities is empty)
+    if (data.user.identities?.length === 0) {
+      return { error: "Nalog sa ovim emailom već postoji." };
+    }
+
+    // Check if email confirmation is required (no session = needs confirmation)
+    if (!data.session) {
+      // Email confirmation required — create profile now so it's ready when they confirm
+      try {
+        await axios.post(`${backendBase}/auth/register-profile`, {
+          supabase_user_id: data.user.id,
+          email: email,
+          full_name: fullName,
+          practice_name: practiceName,
+        });
+      } catch (err: any) {
+        console.error("Error creating profile:", err);
+      }
+      return { error: "EMAIL_CONFIRMATION_NEEDED" };
+    }
+
+    // If we get here, no email confirmation needed (auto-confirm is on)
     try {
       const res = await axios.post(`${backendBase}/auth/register-profile`, {
         supabase_user_id: data.user.id,
