@@ -7,6 +7,10 @@ interface Session {
   kraj: string;
   cena: number;
   status: string;
+  klijent_ime?: string;
+  grupa_naziv?: string;
+  grupa_id?: number | null;
+  placeno?: boolean;
 }
 
 interface Client {
@@ -16,6 +20,7 @@ interface Client {
   broj_telefona: string;
   email: string;
 }
+
 interface Group {
   id: number;
   naziv: string;
@@ -69,12 +74,6 @@ const statusColors: Record<
   default: { bg: "#f3e8ff", border: "#a855f7", text: "#6b21a8" },
 };
 
-interface SesijaKlijent {
-  id: number;
-  sesija_id: number;
-  klijent_id: number;
-}
-
 const Calendar: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [view, setView] = useState<"week" | "month">(
@@ -83,7 +82,6 @@ const Calendar: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
-  const [links, setLinks] = useState<SesijaKlijent[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
@@ -92,7 +90,6 @@ const Calendar: React.FC = () => {
     type: "success" | "error";
   } | null>(null);
   const [saving, setSaving] = useState(false);
-  const [sessionGroups, setSessionGroups] = useState<any[]>([]);
   const [formData, setFormData] = useState({
     pocetak: "",
     kraj: "",
@@ -113,6 +110,7 @@ const Calendar: React.FC = () => {
     [],
   );
 
+  // Fetch sessions — the /sesija/ endpoint already returns klijent_ime, grupa_naziv, grupa_id
   const fetchSessions = async () => {
     try {
       const res = await axios.get(`${backendBase}/sesija/`);
@@ -130,79 +128,24 @@ const Calendar: React.FC = () => {
       console.error("Error fetching clients:", err);
     }
   };
-const fetchSessionGroups = async () => {
-  try {
-    const res = await axios.get(`${backendBase}/sesijagrupa/`);
-    setSessionGroups(Array.isArray(res.data) ? res.data : []);
-  } catch (err) {
-    console.error("Error fetching session-group links:", err);
-  }
-};
-const fetchGroups = async () => {
-  try {
-    const res = await axios.get(`${backendBase}/grupa/`);
-    setGroups(Array.isArray(res.data) ? res.data : []);
-  } catch (err) {
-    console.error("Error fetching groups:", err);
-  }
-};
-  const fetchLinks = async () => {
+
+  const fetchGroups = async () => {
     try {
-      const res = await axios.get(`${backendBase}/sesijaklijent/`);
-      setLinks(Array.isArray(res.data) ? res.data : []);
+      const res = await axios.get(`${backendBase}/grupa/`);
+      setGroups(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
-      console.error("Error fetching session-client links:", err);
+      console.error("Error fetching groups:", err);
     }
   };
 
-    useEffect(() => {
-      Promise.all([
-        fetchSessions(),
-        fetchClients(),
-        fetchGroups(),
-        fetchLinks(),
-        fetchSessionGroups(),
-      ]);
-    }, []);
+  useEffect(() => {
+    Promise.all([fetchSessions(), fetchClients(), fetchGroups()]);
+  }, []);
 
-  // Build a map: sessionId → client name(s)
-  const sessionClientMap = useMemo(() => {
-    const map: Record<number, string> = {};
-    const clientMap: Record<number, Client> = {};
-    clients.forEach((c) => {
-      clientMap[c.id] = c;
-    });
-    links.forEach((link) => {
-      const client = clientMap[link.klijent_id];
-      if (client) {
-        const name = `${client.ime} ${client.prezime}`;
-        if (map[link.sesija_id]) {
-          map[link.sesija_id] += `, ${name}`;
-        } else {
-          map[link.sesija_id] = name;
-        }
-      }
-    });
-    return map;
-  }, [links, clients]);
-
-const sessionGroupMap = useMemo(() => {
-  const map: Record<number, string> = {};
-  const groupMap: Record<number, Group> = {};
-
-  groups.forEach((g) => {
-    groupMap[g.id] = g;
-  });
-
-  sessionGroups.forEach((link) => {
-    const group = groupMap[link.grupa_id]; // <-- CORRECT
-    if (group) {
-      map[link.sesija_1_id] = `Grupa: ${group.naziv}`; // <-- CORRECT
-    }
-  });
-
-  return map;
-}, [sessionGroups, groups]);
+  // Get display name for a session — uses the data already in the session object
+  const getSessionDisplayName = (s: Session): string => {
+    return s.klijent_ime || "";
+  };
 
   const weekStart = useMemo(() => getMonday(currentDate), [currentDate]);
   const weekDays = useMemo(
@@ -229,6 +172,7 @@ const sessionGroupMap = useMemo(() => {
 
   const getSessionsForDay = (day: Date) =>
     sessions.filter((s) => isSameDay(new Date(s.pocetak), day));
+
   const navigateWeek = (dir: number) => {
     const d = new Date(currentDate);
     d.setDate(d.getDate() + dir * 7);
@@ -245,7 +189,6 @@ const sessionGroupMap = useMemo(() => {
     if (hour !== undefined) start.setHours(hour, 0, 0, 0);
     const end = new Date(start);
     end.setHours(start.getHours() + 1);
-    // Format as "YYYY-MM-DDTHH:MM" using local time components (no UTC conversion)
     const pad = (n: number) => String(n).padStart(2, "0");
     const toInput = (d: Date) =>
       `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -262,22 +205,25 @@ const sessionGroupMap = useMemo(() => {
   };
 
   const openEditSession = (session: Session) => {
-    const toInputFormat = (s: string) => {
-      return s.replace(" ", "T").slice(0, 16);
-    };
+    const toInputFormat = (s: string) => s.replace(" ", "T").slice(0, 16);
 
-    const groupLink = sessionGroups.find(
-      (sg: any) => sg.sesija_1_id === session.id,
-    );
-    const clientLink = links.find((l) => l.sesija_id === session.id);
+    // Determine if this is a group session from the session data itself
+    const isGroup = !!session.grupa_id;
 
-    // If it's a group session, use the group's price
     let cena = session.cena;
-    if (groupLink) {
-      const grupa = groups.find((g) => g.id === groupLink.grupa_id);
-      if (grupa?.cena) {
-        cena = grupa.cena;
-      }
+    if (isGroup) {
+      const grupa = groups.find((g) => g.id === session.grupa_id);
+      if (grupa?.cena) cena = grupa.cena;
+    }
+
+    // For individual sessions, we need to find the klijent_id from the session name
+    let klijentId = "";
+    if (!isGroup && session.klijent_ime) {
+      // Find client by matching name
+      const client = clients.find(
+        (c) => `${c.ime} ${c.prezime}` === session.klijent_ime,
+      );
+      if (client) klijentId = String(client.id);
     }
 
     setFormData({
@@ -285,14 +231,13 @@ const sessionGroupMap = useMemo(() => {
       kraj: toInputFormat(session.kraj),
       cena: cena,
       status: session.status,
-      klijent_id: clientLink ? String(clientLink.klijent_id) : "",
-      grupa_id: groupLink ? String(groupLink.grupa_id) : "",
+      klijent_id: klijentId,
+      grupa_id: isGroup && session.grupa_id ? String(session.grupa_id) : "",
     });
     setSelectedSession(session);
     setShowModal(true);
   };
 
-  // INSTANT DELETE with animation — no confirm, no save needed
   const handleDeleteDirect = async (
     sessionId: number,
     e?: React.MouseEvent,
@@ -301,12 +246,7 @@ const sessionGroupMap = useMemo(() => {
     setDeletingId(sessionId);
     await new Promise((r) => setTimeout(r, 350));
 
-    // Optimistic removal from all state
     setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-    setLinks((prev) => prev.filter((l) => l.sesija_id !== sessionId));
-    setSessionGroups((prev) =>
-      prev.filter((sg: any) => sg.sesija_1_id !== sessionId),
-    );
     setDeletingId(null);
     if (showModal && selectedSession?.id === sessionId) setShowModal(false);
 
@@ -319,7 +259,7 @@ const sessionGroupMap = useMemo(() => {
         showToast("Sesija obrisana");
       } else {
         showToast("Greška pri brisanju!", "error");
-        Promise.all([fetchSessions(), fetchLinks(), fetchSessionGroups()]);
+        fetchSessions();
       }
     }
   };
@@ -327,17 +267,14 @@ const sessionGroupMap = useMemo(() => {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const newId = selectedSession
-        ? selectedSession.id
-        : Math.floor(Math.random() * 900000) + 100000;
       const pocetakStr =
         formData.pocetak.length === 16
           ? formData.pocetak + ":00"
           : formData.pocetak;
       const krajStr =
         formData.kraj.length === 16 ? formData.kraj + ":00" : formData.kraj;
+
       const payload = {
-        id: newId,
         pocetak: pocetakStr,
         kraj: krajStr,
         cena: formData.cena,
@@ -349,78 +286,31 @@ const sessionGroupMap = useMemo(() => {
         grupa_id: formData.grupa_id ? parseInt(formData.grupa_id) : null,
       };
 
+      setShowModal(false);
+
       if (selectedSession) {
-        // EDIT — optimistic update
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === selectedSession.id
-              ? {
-                  ...s,
-                  pocetak: pocetakStr,
-                  kraj: krajStr,
-                  cena: formData.cena,
-                  status: formData.status,
-                }
-              : s,
-          ),
-        );
-        setShowModal(false);
-        showToast("Sesija ažurirana");
-
-        axios
-          .put(`${backendBase}/sesija/${selectedSession.id}/`, payload)
-          .then(() =>
-            Promise.all([fetchSessions(), fetchLinks(), fetchSessionGroups()]),
-          )
-          .catch(() => {
-            showToast("Greška pri čuvanju!", "error");
-            Promise.all([fetchSessions(), fetchLinks(), fetchSessionGroups()]);
-          });
+        // EDIT
+        try {
+          await axios.put(
+            `${backendBase}/sesija/${selectedSession.id}/`,
+            payload,
+          );
+          showToast("Sesija ažurirana");
+        } catch {
+          showToast("Greška pri čuvanju!", "error");
+        }
       } else {
-        // CREATE — optimistic insert
-        const optimisticSession: Session = {
-          id: newId,
-          pocetak: pocetakStr,
-          kraj: krajStr,
-          cena: formData.cena,
-          status: formData.status,
-        };
-        setSessions((prev) => [...prev, optimisticSession]);
-
-        if (formData.klijent_id) {
-          setLinks((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              sesija_id: newId,
-              klijent_id: parseInt(formData.klijent_id),
-            },
-          ]);
+        // CREATE
+        try {
+          await axios.post(`${backendBase}/sesija/`, payload);
+          showToast("Nova sesija kreirana");
+        } catch {
+          showToast("Greška pri čuvanju!", "error");
         }
-        if (formData.grupa_id) {
-          setSessionGroups((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              sesija_1_id: newId,
-              grupa_id: parseInt(formData.grupa_id),
-            },
-          ]);
-        }
-
-        setShowModal(false);
-        showToast("Nova sesija kreirana");
-
-        axios
-          .post(`${backendBase}/sesija/`, payload)
-          .then(() =>
-            Promise.all([fetchSessions(), fetchLinks(), fetchSessionGroups()]),
-          )
-          .catch(() => {
-            showToast("Greška pri čuvanju!", "error");
-            Promise.all([fetchSessions(), fetchLinks(), fetchSessionGroups()]);
-          });
       }
+
+      // Always refetch after save to get correct data with klijent_ime, etc.
+      await fetchSessions();
     } catch (err) {
       showToast("Greška pri čuvanju!", "error");
     } finally {
@@ -432,7 +322,6 @@ const sessionGroupMap = useMemo(() => {
 
   return (
     <div className="cal-container">
-      {/* Toast */}
       {toast && (
         <div className={`cal-toast cal-toast-${toast.type}`}>
           <span className="cal-toast-icon">
@@ -511,7 +400,6 @@ const sessionGroupMap = useMemo(() => {
       {/* Week View */}
       {view === "week" && (
         <>
-          {/* Desktop grid */}
           <div className="cal-week cal-week-desktop">
             <div className="cal-time-col">
               <div className="cal-time-header"></div>
@@ -551,6 +439,7 @@ const sessionGroupMap = useMemo(() => {
                           const colors =
                             statusColors[s.status] || statusColors.default;
                           const isDeleting = deletingId === s.id;
+                          const displayName = getSessionDisplayName(s);
                           return (
                             <div
                               key={s.id}
@@ -566,11 +455,11 @@ const sessionGroupMap = useMemo(() => {
                               }}
                             >
                               <div className="cal-session-content">
-                                <span className="cal-session-name">
-                                  {sessionClientMap[s.id] ||
-                                    sessionGroupMap[s.id] ||
-                                    ""}
-                                </span>
+                                {displayName && (
+                                  <span className="cal-session-name">
+                                    {displayName}
+                                  </span>
+                                )}
                                 <span className="cal-session-time">
                                   {formatTime(start)} - {formatTime(end)}
                                 </span>
@@ -634,6 +523,7 @@ const sessionGroupMap = useMemo(() => {
                         const end = new Date(s.kraj);
                         const colors =
                           statusColors[s.status] || statusColors.default;
+                        const displayName = getSessionDisplayName(s);
                         return (
                           <div
                             key={s.id}
@@ -648,11 +538,9 @@ const sessionGroupMap = useMemo(() => {
                               openEditSession(s);
                             }}
                           >
-                            {(sessionClientMap[s.id] ||
-                              sessionGroupMap[s.id]) && (
+                            {displayName && (
                               <span className="cal-agenda-item-name">
-                                {sessionClientMap[s.id] ||
-                                  sessionGroupMap[s.id]}
+                                {displayName}
                               </span>
                             )}
                             <span className="cal-agenda-item-time">
@@ -726,7 +614,7 @@ const sessionGroupMap = useMemo(() => {
                             e.stopPropagation();
                             openEditSession(s);
                           }}
-                          title={`${sessionClientMap[s.id] || sessionGroupMap[s.id] || ""} — ${formatTime(new Date(s.pocetak))} - ${s.cena} RSD`}
+                          title={`${getSessionDisplayName(s)} — ${formatTime(new Date(s.pocetak))} - ${s.cena} RSD`}
                         />
                       );
                     })}
@@ -868,8 +756,6 @@ const sessionGroupMap = useMemo(() => {
                   </select>
                 </div>
               )}
-
-              
 
               {formData.grupa_id &&
                 (() => {
