@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { TableBlock } from "../components/runtime/TableBlock";
 import Dashboard from "./Dashboard";
-const tenantId = localStorage.getItem("tenant_id");
+// const tenantId = localStorage.getItem("tenant_id");
 const tabs = [
   {
     key: "klijent",
@@ -505,10 +505,8 @@ const AdminPanel: React.FC = () => {
         className={`admin-table-container ${animating ? "admin-table-exit" : "admin-table-enter"}`}
       >
         {activeTab === "statistika" ? (
-          
           <Dashboard />
         ) : config ? (
-          
           <TableBlock
             key={activeTab}
             id={`table-${activeTab}`}
@@ -517,7 +515,7 @@ const AdminPanel: React.FC = () => {
             options={config.options}
             dataBinding={{
               entity: config.entity,
-              endpoint: `${config.endpoint}?tenant_id=${tenantId}`,
+              endpoint: config.endpoint,
             }}
           />
         ) : null}
