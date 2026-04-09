@@ -1810,10 +1810,39 @@ async def create_sesija(
         kraj=sesija_data.kraj
     )
     database.add(db_sesija)
+    database.flush()  # get the ID before creating links
+
+    # Create klijent link
+    if sesija_data.klijent_id:
+        klijent = database.query(Klijent).filter(
+            Klijent.id == sesija_data.klijent_id,
+            Klijent.tenant_id == tenant_id
+        ).first()
+        if klijent:
+            new_sk = SesijaKlijent(
+                tenant_id=tenant_id,
+                klijent_id=klijent.id,
+                sesija_id=db_sesija.id
+            )
+            database.add(new_sk)
+
+    # Create grupa link
+    elif sesija_data.grupa_id:
+        grupa = database.query(Grupa).filter(
+            Grupa.id == sesija_data.grupa_id,
+            Grupa.tenant_id == tenant_id
+        ).first()
+        if grupa:
+            new_sg = SesijaGrupa(
+                tenant_id=tenant_id,
+                grupa_id=grupa.id,
+                sesija_1_id=db_sesija.id
+            )
+            database.add(new_sg)
+
     database.commit()
     database.refresh(db_sesija)
     return db_sesija
-
 
 @app.post("/sesija/bulk/", response_model=None, tags=["Sesija"])
 async def bulk_create_sesija(
