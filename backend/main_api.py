@@ -28,7 +28,11 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 #   Initialize the database
 #
 ############################################
-
+origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://crm-tool-frontend-e885b1.onrender.com",
+]
 def get_tenant_id(request: Request) -> int:
     """
     Resolve tenant from the X-Tenant-ID header.
@@ -355,7 +359,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
 # Enable CORS for all origins (for development)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
