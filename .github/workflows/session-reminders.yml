@@ -1,0 +1,26 @@
+name: Send session reminders
+
+on:
+  schedule:
+    # Runs at the top of every hour. The backend only sends a reminder for
+    # sessions starting 23-25h out, so each session is covered by two
+    # consecutive runs - missing one run doesn't skip its reminder.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call backend reminder endpoint
+        run: |
+          status=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://crm-tool-backend-e885b1.onrender.com/internal/send-reminders" \
+            -H "X-Internal-Secret: ${{ secrets.REMINDER_CRON_SECRET }}")
+          echo "Response body:"
+          cat /tmp/response.json
+          echo ""
+          if [ "$status" -ge 300 ]; then
+            echo "Reminder endpoint returned HTTP $status"
+            exit 1
+          fi

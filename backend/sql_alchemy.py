@@ -121,6 +121,7 @@ class Sesija(Base):
 
     cena: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(100))
+    reminder_sent: Mapped[bool] = mapped_column(Boolean, default=False)
 
     uplate = relationship("Cena", back_populates="sesija_2")
     sesijaklijent_1 = relationship("SesijaKlijent", back_populates="sesija")

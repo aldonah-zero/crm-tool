@@ -4,7 +4,7 @@ import time as time_module
 import hmac, hashlib, base64
 import logging
 from datetime import datetime, timedelta, time as dt_time
-from fastapi import Depends, FastAPI, HTTPException, Request, status, Body
+from fastapi import Depends, FastAPI, HTTPException, Request, status, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
@@ -28,6 +28,10 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 # Secret used to sign team-invite tokens (set INVITE_SECRET in production envs)
 INVITE_SECRET = os.getenv("INVITE_SECRET", "dev-insecure-invite-secret-change-me")
 INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 3600  # invite links are valid for 7 days
+
+# Shared secret the external reminder cron (see .github/workflows) must send
+# as X-Internal-Secret to trigger /internal/send-reminders. Unset in prod = disabled.
+INTERNAL_CRON_SECRET = os.getenv("INTERNAL_CRON_SECRET")
 
 ############################################
 #
@@ -64,6 +68,7 @@ def run_light_migrations(engine):
         "ALTER TABLE tenant ADD COLUMN specialties TEXT",
         "ALTER TABLE tenant ADD COLUMN working_hours TEXT",
         "ALTER TABLE tenant ADD COLUMN default_price FLOAT",
+        "ALTER TABLE sesija ADD COLUMN reminder_sent BOOLEAN DEFAULT FALSE",
     ]
     with engine.connect() as conn:
         for stmt in statements:
@@ -2744,6 +2749,99 @@ def public_book_session(
         "pocetak": sesija.pocetak.isoformat(),
         "kraj": sesija.kraj.isoformat(),
     }
+
+
+def send_session_reminder_email(klijent, sesija, therapist_name):
+    """Sends the 'day before' reminder to the client. Unlike the other
+    email helpers here, this one is allowed to raise - the caller only
+    marks reminder_sent once the send actually succeeds, so a transient
+    failure gets retried on the next hourly cron run instead of being
+    silently lost."""
+    klijent_ime = f"{klijent.ime} {klijent.prezime}"
+    html = f"""
+<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
+<div style="max-width:520px;margin:auto;">
+<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="font-size:22px;margin-bottom:8px;">⏰ Podsetnik za sutra</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;">Podsećamo vas na termin kod <strong>{therapist_name}</strong> sutra.</div>
+</div>
+<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
+<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
+<div style="font-size:15px;font-weight:600;color:#111;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
+</div>
+</div>
+<div style="background:#fff;border-radius:16px;padding:20px 24px;margin-bottom:8px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="font-size:13px;color:#777;line-height:1.5;"><strong>Pravila otkazivanja</strong><br>Termin se može otkazati najkasnije <strong>24 sata</strong> unapred.</div>
+</div>
+<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
+Vidimo se! <strong style="color:#6b7280;">PsihoApp</strong>
+</div>
+</div>
+</div>
+"""
+    resend.Emails.send({
+        "from": "PsihoApp <noreply@hrioapp.com>",
+        "to": [klijent.email],
+        "subject": f"⏰ Podsetnik: termin sutra u {format_time(sesija.pocetak)}",
+        "html": html,
+    })
+
+
+@app.post("/internal/send-reminders", tags=["System"])
+def send_session_reminders(
+        x_internal_secret: str = Header(None, alias="X-Internal-Secret"),
+        database: Session = Depends(get_db),
+):
+    """Triggered by an hourly external cron (see .github/workflows). Finds
+    sessions starting 23-25h from now that haven't been reminded yet and
+    emails the client. The 2-hour window means a session is covered by two
+    consecutive hourly runs, so missing one run doesn't skip its reminder."""
+    if not INTERNAL_CRON_SECRET or x_internal_secret != INTERNAL_CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    now = datetime.utcnow()
+    window_start = now + timedelta(hours=23)
+    window_end = now + timedelta(hours=25)
+
+    sessions = database.query(Sesija).filter(
+        Sesija.status == "zakazano",
+        Sesija.reminder_sent.is_(False),
+        Sesija.pocetak >= window_start,
+        Sesija.pocetak <= window_end,
+    ).all()
+
+    sent = 0
+    skipped = 0
+    for sesija in sessions:
+        link = database.query(SesijaKlijent).filter(
+            SesijaKlijent.sesija_id == sesija.id
+        ).first()
+        klijent = (
+            database.query(Klijent).filter(Klijent.id == link.klijent_id).first()
+            if link else None
+        )
+        if not klijent or not klijent.email:
+            skipped += 1
+            continue
+
+        therapist_name = get_owner_name(sesija.tenant_id, database)
+        if not therapist_name:
+            tenant = database.query(Tenant).filter(Tenant.id == sesija.tenant_id).first()
+            therapist_name = tenant.name if tenant else "vašeg terapeuta"
+
+        try:
+            send_session_reminder_email(klijent, sesija, therapist_name)
+        except Exception as e:
+            logger.error(f"Failed to send reminder for session {sesija.id}: {e}")
+            continue
+
+        sesija.reminder_sent = True
+        sent += 1
+
+    database.commit()
+    return {"checked": len(sessions), "sent": sent, "skipped": skipped}
 
 
 ############################################
