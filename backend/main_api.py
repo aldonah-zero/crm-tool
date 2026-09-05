@@ -2586,6 +2586,101 @@ class PublicBookingRequest(BaseModel):
     kraj: datetime
 
 
+def send_public_booking_emails(tenant_name, therapist_emails, klijent, sesija, napomena):
+    """Best-effort notification emails for an online booking - a failure
+    here must never block the booking itself, which is why every send is
+    wrapped and only logged on error."""
+    klijent_ime = f"{klijent.ime} {klijent.prezime}"
+
+    try:
+        client_html = f"""
+<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
+<div style="max-width:520px;margin:auto;">
+<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="font-size:22px;margin-bottom:8px;">✅ Termin je zakazan</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;">Vaš termin kod <strong>{tenant_name}</strong> je uspešno zakazan.</div>
+</div>
+<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
+<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
+<div style="font-size:15px;font-weight:600;color:#111;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
+</div>
+</div>
+<div style="background:#fff;border-radius:16px;padding:20px 24px;margin-bottom:8px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="font-size:13px;color:#777;line-height:1.5;"><strong>Pravila otkazivanja</strong><br>Termin se može otkazati najkasnije <strong>24 sata</strong> unapred.</div>
+</div>
+<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
+Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
+</div>
+</div>
+</div>
+"""
+        resend.Emails.send({
+            "from": "PsihoApp <noreply@hrioapp.com>",
+            "to": [klijent.email],
+            "subject": f"✅ Potvrda termina - {format_date_long(sesija.pocetak)}",
+            "html": client_html,
+        })
+    except Exception as e:
+        logger.error(f"Failed to send booking confirmation to client: {e}")
+
+    if not therapist_emails:
+        return
+
+    try:
+        napomena_row = (
+            f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Napomena klijenta:</strong> {napomena}</div>'
+            if napomena else ""
+        )
+        therapist_html = f"""
+<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
+<div style="max-width:520px;margin:auto;">
+<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="font-size:22px;margin-bottom:8px;">🔔 Novi termin zakazan online</div>
+<div style="font-size:15px;color:#1a1a1a;">Klijent <strong>{klijent_ime}</strong> je preko "Pronađi terapeuta" zakazao termin.</div>
+</div>
+<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
+<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
+<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
+<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
+<div style="font-size:14px;color:#555;">{klijent_ime} · {klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
+{napomena_row}
+</div>
+</div>
+<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
+<strong style="color:#6b7280;">PsihoApp</strong>
+</div>
+</div>
+</div>
+"""
+        resend.Emails.send({
+            "from": "PsihoApp <noreply@hrioapp.com>",
+            "to": therapist_emails,
+            "subject": f"🔔 Novo zakazivanje - {klijent_ime}",
+            "html": therapist_html,
+        })
+    except Exception as e:
+        logger.error(f"Failed to send booking notification to therapist: {e}")
+
+
+@app.get("/public/debug-email", tags=["Public"])
+def debug_email_send(to: str):
+    """TEMPORARY - remove once email delivery is confirmed working.
+    Surfaces the raw Resend exception directly in the response, since
+    normal booking emails swallow send errors into server logs only."""
+    try:
+        result = resend.Emails.send({
+            "from": "PsihoApp <noreply@hrioapp.com>",
+            "to": [to],
+            "subject": "Test email - PsihoApp debug",
+            "html": "<p>Ovo je test email.</p>",
+        })
+        return {"ok": True, "result": result, "api_key_set": bool(resend.api_key)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "error_type": type(e).__name__, "api_key_set": bool(resend.api_key)}
+
+
 @app.post("/public/therapists/{tenant_id}/book", tags=["Public"])
 def public_book_session(
         tenant_id: int,
@@ -2634,6 +2729,12 @@ def public_book_session(
 
     database.commit()
     database.refresh(sesija)
+
+    therapist_emails = [
+        p.email for p in
+        database.query(UserProfile).filter(UserProfile.tenant_id == tenant_id).all()
+    ]
+    send_public_booking_emails(tenant.name, therapist_emails, klijent, sesija, data.napomena)
 
     return {
         "sesija_id": sesija.id,
