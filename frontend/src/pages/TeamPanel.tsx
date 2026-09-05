@@ -55,17 +55,26 @@ const TeamPanel: React.FC = () => {
     }
   };
 
+  const cardStyle: React.CSSProperties = {
+    background: "#fff",
+    borderRadius: 16,
+    padding: 26,
+    boxShadow:
+      "0 1px 3px rgba(0,0,0,0.04), 0 12px 32px rgba(15,23,42,0.05), 0 0 0 1px rgba(15,23,42,0.04)",
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div
-        style={{
-          background: "#fff",
-          borderRadius: 12,
-          padding: 24,
-          border: "1px solid #e5e7eb",
-        }}
-      >
-        <h3 style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 700 }}>
+      <div style={cardStyle}>
+        <h3
+          style={{
+            margin: "0 0 6px",
+            fontFamily: "var(--font-display), Georgia, serif",
+            fontSize: 18,
+            fontWeight: 600,
+            color: "#0f172a",
+          }}
+        >
           Pozovite člana tima
         </h3>
         <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748b" }}>
@@ -81,11 +90,12 @@ const TeamPanel: React.FC = () => {
             style={{
               flex: 1,
               padding: "10px 12px",
-              borderRadius: 8,
-              border: "1px solid #e5e7eb",
+              borderRadius: 10,
+              border: "1.5px solid #e2e8f0",
               fontSize: 13,
               color: "#334155",
               background: "#f8fafc",
+              fontFamily: "var(--font-mono), monospace",
             }}
           />
           <button
@@ -94,14 +104,28 @@ const TeamPanel: React.FC = () => {
             disabled={loading || !inviteUrl}
             style={{
               padding: "10px 18px",
-              borderRadius: 8,
+              borderRadius: 10,
               border: "none",
-              background: "#6366f1",
+              background: "linear-gradient(135deg, #6366f1, #7c3aed)",
               color: "#fff",
               fontWeight: 600,
               fontSize: 13,
               cursor: loading ? "default" : "pointer",
               whiteSpace: "nowrap",
+              fontFamily: "inherit",
+              boxShadow: "0 4px 12px rgba(99,102,241,0.3)",
+              transition: "transform 0.2s ease, box-shadow 0.2s ease",
+            }}
+            onMouseEnter={(e) => {
+              if (loading || !inviteUrl) return;
+              e.currentTarget.style.transform = "translateY(-1px)";
+              e.currentTarget.style.boxShadow =
+                "0 6px 16px rgba(99,102,241,0.4)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow =
+                "0 4px 12px rgba(99,102,241,0.3)";
             }}
           >
             {copied ? "Kopirano!" : "Kopiraj link"}
@@ -114,15 +138,16 @@ const TeamPanel: React.FC = () => {
         )}
       </div>
 
-      <div
-        style={{
-          background: "#fff",
-          borderRadius: 12,
-          padding: 24,
-          border: "1px solid #e5e7eb",
-        }}
-      >
-        <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>
+      <div style={cardStyle}>
+        <h3
+          style={{
+            margin: "0 0 16px",
+            fontFamily: "var(--font-display), Georgia, serif",
+            fontSize: 18,
+            fontWeight: 600,
+            color: "#0f172a",
+          }}
+        >
           Članovi tima
         </h3>
         {loading ? (
@@ -138,9 +163,16 @@ const TeamPanel: React.FC = () => {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  padding: "10px 12px",
-                  borderRadius: 8,
+                  padding: "12px 14px",
+                  borderRadius: 12,
                   background: "#f8fafc",
+                  transition: "background 0.15s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "#f1f5f9";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "#f8fafc";
                 }}
               >
                 <div>

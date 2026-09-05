@@ -1,26 +1,38 @@
 /* ============================================
-   AUTH PAGE STYLES
-   Add this to your App.css or import separately
+   AUTH PAGE STYLES (shared by therapist + client login)
    ============================================ */
 
 .auth-container {
   min-height: 100vh;
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  background:
+    radial-gradient(circle at 15% 20%, rgba(99, 102, 241, 0.28), transparent 55%),
+    radial-gradient(circle at 85% 85%, rgba(124, 58, 237, 0.24), transparent 55%),
+    linear-gradient(160deg, #0b1120 0%, #131c31 55%, #0b1120 100%);
   padding: 20px;
-  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-body), 'DM Sans', system-ui, -apple-system, sans-serif;
+}
+
+@keyframes authCardIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .auth-card {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 420px;
   background: #ffffff;
-  border-radius: 20px;
+  border-radius: 22px;
   padding: 40px 36px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  animation: authCardIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .auth-header {
@@ -40,11 +52,12 @@
 }
 
 .auth-title {
-  font-size: 24px;
-  font-weight: 700;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 26px;
+  font-weight: 600;
   color: #0f172a;
   margin: 0 0 6px;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.3px;
 }
 
 .auth-subtitle {
@@ -92,14 +105,19 @@
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   font-family: inherit;
 }
 
 .auth-btn-google:hover {
   background: #f8fafc;
   border-color: #cbd5e1;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+.auth-btn-google:active {
+  transform: translateY(0);
 }
 
 /* Divider */
@@ -124,6 +142,7 @@
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  font-family: var(--font-mono), monospace;
 }
 
 /* Form */
@@ -153,14 +172,14 @@
   font-family: inherit;
   color: #1e293b;
   background: #f8fafc;
-  transition: all 0.2s;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
   outline: none;
 }
 
 .auth-field input:focus {
   border-color: #6366f1;
   background: #fff;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 .auth-field input::placeholder {
@@ -178,15 +197,19 @@
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
   font-family: inherit;
   margin-top: 4px;
   box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3);
 }
 
 .auth-btn-primary:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(99, 102, 241, 0.4);
+}
+
+.auth-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .auth-btn-primary:disabled {
@@ -224,13 +247,19 @@
 
 /* Footer */
 .auth-footer {
+  position: relative;
+  z-index: 1;
   margin-top: 24px;
 }
 
 .auth-footer p {
   font-size: 12px;
-  color: #475569;
-  margin: 0;
+  color: #94a3b8;
+  margin: 0 0 4px;
+}
+
+.auth-footer a {
+  transition: color 0.15s ease;
 }
 
 /* Mobile */
@@ -241,6 +270,10 @@
   }
 
   .auth-title {
-    font-size: 20px;
+    font-size: 22px;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-card { animation: none; }
 }

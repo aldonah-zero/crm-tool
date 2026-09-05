@@ -2521,6 +2521,18 @@ def update_tenant_settings(
     return _tenant_settings_payload(tenant)
 
 
+def get_owner_name(tenant_id: int, database: Session) -> str:
+    """The individual therapist's name to show clients, instead of the
+    practice name - the tenant's owner. Falls back to their email, then to
+    the practice name if somehow neither exists."""
+    owner = database.query(UserProfile).filter(
+        UserProfile.tenant_id == tenant_id, UserProfile.role == "owner"
+    ).first()
+    if owner:
+        return owner.full_name or owner.email
+    return ""
+
+
 @app.get("/public/therapists", tags=["Public"])
 def public_search_therapists(
         tags: str = "",
@@ -2548,6 +2560,7 @@ def public_search_therapists(
         results.append({
             "tenant_id": tenant.id,
             "name": tenant.name,
+            "therapist_name": get_owner_name(tenant.id, database) or tenant.name,
             "specialties": sorted(tenant_tags),
             "matched_tags": sorted(matched),
             "match_count": len(matched),
@@ -2572,6 +2585,7 @@ def public_therapist_availability(
     return {
         "tenant_id": tenant.id,
         "name": tenant.name,
+        "therapist_name": get_owner_name(tenant_id, database) or tenant.name,
         "slots": [
             {"start": s["start"].isoformat(), "end": s["end"].isoformat()}
             for s in slots
@@ -2692,7 +2706,7 @@ def public_book_session(
             ime=data.ime,
             prezime=data.prezime,
             email=data.email,
-            broj_telefona=data.telefon,
+            broj_telefona=data.telefon or "",
         )
         database.add(klijent)
         database.flush()
@@ -2725,6 +2739,7 @@ def public_book_session(
     return {
         "sesija_id": sesija.id,
         "tenant_name": tenant.name,
+        "therapist_name": get_owner_name(tenant_id, database) or tenant.name,
         "klijent_ime": f"{klijent.ime} {klijent.prezime}",
         "pocetak": sesija.pocetak.isoformat(),
         "kraj": sesija.kraj.isoformat(),
@@ -3035,6 +3050,37 @@ def get_or_create_client_profile(
     }
 
 
+class ClientProfileUpdate(PydanticBaseModel):
+    full_name: str | None = None
+    phone: str | None = None
+
+
+@app.put("/client-auth/profile", tags=["ClientAuth"])
+def update_client_profile(
+        data: ClientProfileUpdate,
+        client_id: int = Depends(get_client_id),
+        database: Session = Depends(get_db)
+):
+    account = database.query(ClientAccount).filter(ClientAccount.id == client_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    if data.full_name is not None:
+        account.full_name = data.full_name.strip() or account.full_name
+    if data.phone is not None:
+        account.phone = data.phone.strip() or None
+
+    database.commit()
+    database.refresh(account)
+
+    return {
+        "client_id": account.id,
+        "email": account.email,
+        "full_name": account.full_name,
+        "phone": account.phone,
+    }
+
+
 @app.get("/client/appointments", tags=["ClientAuth"])
 def list_client_appointments(
         client_id: int = Depends(get_client_id),
@@ -3068,11 +3114,14 @@ def list_client_appointments(
 
     sesije = database.query(Sesija).filter(Sesija.id.in_(sesija_ids)).all() if sesija_ids else []
 
+    therapist_names = {t_id: get_owner_name(t_id, database) for t_id in tenants}
+
     result = [
         {
             "sesija_id": s.id,
             "tenant_id": s.tenant_id,
             "tenant_name": tenants.get(s.tenant_id, ""),
+            "therapist_name": therapist_names.get(s.tenant_id) or tenants.get(s.tenant_id, ""),
             "pocetak": s.pocetak.isoformat(),
             "kraj": s.kraj.isoformat(),
             "cena": s.cena,

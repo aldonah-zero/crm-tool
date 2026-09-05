@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=DM+Mono:wght@400;500&display=swap');
+
+:root {
+  /* Brand */
+  --brand-indigo: #6366f1;
+  --brand-violet: #7c3aed;
+  --brand-green: #16a34a;
+  --brand-green-dark: #15803d;
+
+  /* Surfaces */
+  --bg-deep: #0b1120;
+  --bg-deep-mid: #131c31;
+  --bg-slate: #1e293b;
+  --surface: #ffffff;
+
+  /* Text */
+  --ink-900: #0f172a;
+  --ink-600: #475569;
+  --ink-400: #94a3b8;
+
+  /* Type */
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "DM Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, monospace;
+
+  /* Motion easing */
+  --ease-premium: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.brand-gradient-text {
+  background: linear-gradient(135deg, #a5b4fc, #f5d0fe 60%, #c4b5fd);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glow-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+@keyframes driftA {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, -20px) scale(1.08); }
+}
+
+@keyframes driftB {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-24px, 24px) scale(0.95); }
+}
+
+.glow-orb.drift-a { animation: driftA 14s var(--ease-premium) infinite; }
+.glow-orb.drift-b { animation: driftB 18s var(--ease-premium) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .glow-orb.drift-a, .glow-orb.drift-b { animation: none; }
+}

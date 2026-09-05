@@ -98,31 +98,33 @@ const ClientProfileSettings: React.FC = () => {
     }
   };
 
+  const cardStyle: React.CSSProperties = {
+    background: "#fff",
+    borderRadius: 16,
+    padding: 26,
+    boxShadow:
+      "0 1px 3px rgba(0,0,0,0.04), 0 12px 32px rgba(15,23,42,0.05), 0 0 0 1px rgba(15,23,42,0.04)",
+  };
+
   if (loading) {
     return (
-      <div
-        style={{
-          background: "#fff",
-          borderRadius: 12,
-          padding: 24,
-          border: "1px solid #e5e7eb",
-        }}
-      >
+      <div style={cardStyle}>
         <p style={{ fontSize: 13, color: "#64748b" }}>Učitavanje...</p>
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        background: "#fff",
-        borderRadius: 12,
-        padding: 24,
-        border: "1px solid #e5e7eb",
-      }}
-    >
-      <h3 style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 700 }}>
+    <div style={cardStyle}>
+      <h3
+        style={{
+          margin: "0 0 6px",
+          fontFamily: "var(--font-display), Georgia, serif",
+          fontSize: 18,
+          fontWeight: 600,
+          color: "#0f172a",
+        }}
+      >
         Vaš profil za klijente
       </h3>
       <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748b" }}>
@@ -149,14 +151,24 @@ const ClientProfileSettings: React.FC = () => {
           width: "100%",
           maxWidth: 320,
           padding: "10px 12px",
-          borderRadius: 8,
-          border: "1px solid #e2e8f0",
+          borderRadius: 10,
+          border: "1.5px solid #e2e8f0",
           fontSize: 13,
           color: "#1e293b",
           background: "#f8fafc",
           marginBottom: 24,
           boxSizing: "border-box",
           display: "block",
+          outline: "none",
+          transition: "border-color 0.18s ease, box-shadow 0.18s ease",
+        }}
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = "#6366f1";
+          e.currentTarget.style.boxShadow = "0 0 0 3px rgba(99,102,241,0.12)";
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = "#e2e8f0";
+          e.currentTarget.style.boxShadow = "none";
         }}
       />
 
@@ -196,6 +208,8 @@ const ClientProfileSettings: React.FC = () => {
                 fontWeight: 600,
                 cursor: "pointer",
                 fontFamily: "inherit",
+                boxShadow: active ? "0 4px 12px rgba(99,102,241,0.3)" : "none",
+                transition: "all 0.18s ease",
               }}
             >
               {tag.label}
@@ -312,14 +326,26 @@ const ClientProfileSettings: React.FC = () => {
           onClick={handleSave}
           disabled={saving}
           style={{
-            padding: "10px 20px",
-            borderRadius: 8,
+            padding: "10px 22px",
+            borderRadius: 10,
             border: "none",
-            background: "#6366f1",
+            background: "linear-gradient(135deg, #6366f1, #7c3aed)",
             color: "#fff",
             fontWeight: 600,
             fontSize: 13,
+            fontFamily: "inherit",
             cursor: saving ? "default" : "pointer",
+            boxShadow: "0 4px 12px rgba(99,102,241,0.3)",
+            transition: "transform 0.2s ease, box-shadow 0.2s ease",
+          }}
+          onMouseEnter={(e) => {
+            if (saving) return;
+            e.currentTarget.style.transform = "translateY(-1px)";
+            e.currentTarget.style.boxShadow = "0 6px 16px rgba(99,102,241,0.4)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = "translateY(0)";
+            e.currentTarget.style.boxShadow = "0 4px 12px rgba(99,102,241,0.3)";
           }}
         >
           {saving ? "Čuvanje..." : "Sačuvaj"}

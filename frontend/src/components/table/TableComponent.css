@@ -112,8 +112,9 @@
 .table-modal-title {
   margin: 0;
   padding: 28px 28px 0;
-  font-size: 20px;
-  font-weight: 700;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 21px;
+  font-weight: 600;
   color: #0f172a;
   letter-spacing: -0.01em;
 }
@@ -368,6 +369,10 @@
    ============================ */
 .table-row {
   transition: background-color 0.2s ease;
+}
+
+.table-row:hover {
+  background-color: #f8fafc;
 }
 
 /* ============================
