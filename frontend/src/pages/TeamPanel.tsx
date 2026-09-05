@@ -30,7 +30,7 @@ const TeamPanel: React.FC = () => {
       ]);
       setMembers(membersRes.data);
       setInviteUrl(
-        `${window.location.origin}/?invite=${encodeURIComponent(inviteRes.data.invite_token)}`,
+        `${window.location.origin}/therapist?invite=${encodeURIComponent(inviteRes.data.invite_token)}`,
       );
     } catch (err) {
       console.error("Error loading team:", err);

@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import {
   SPECIALTY_TAGS,
   TAG_LABEL_BY_SLUG,
   suggestTagsFromText,
 } from "../lib/specialtyTags";
+import { useClientAuth } from "../contexts/ClientAuthContext";
 
 const backendBase =
   (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
@@ -115,6 +117,9 @@ const backLink: React.CSSProperties = {
 };
 
 const FindTherapist: React.FC = () => {
+  const { profile: clientProfile } = useClientAuth();
+  const navigate = useNavigate();
+
   useEffect(() => {
     injectStyles();
   }, []);
@@ -140,6 +145,18 @@ const FindTherapist: React.FC = () => {
     tenant_name: string;
     pocetak: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (!clientProfile) return;
+    const [ime, ...rest] = (clientProfile.full_name || "").split(" ");
+    setForm((prev) => ({
+      ...prev,
+      ime: prev.ime || ime || "",
+      prezime: prev.prezime || rest.join(" "),
+      email: prev.email || clientProfile.email || "",
+      telefon: prev.telefon || clientProfile.phone || "",
+    }));
+  }, [clientProfile]);
 
   const suggestedTags = useMemo(
     () =>
@@ -258,8 +275,22 @@ const FindTherapist: React.FC = () => {
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
+        position: "relative",
       }}
     >
+      <a
+        href={clientProfile ? "/client/dashboard" : "/client"}
+        style={{
+          position: "absolute",
+          top: 20,
+          right: 24,
+          fontSize: 13,
+          fontWeight: 600,
+          color: "#a5b4fc",
+        }}
+      >
+        {clientProfile ? "Vaši termini →" : "Prijavite se →"}
+      </a>
       <div
         style={{
           textAlign: "center",
@@ -663,62 +694,72 @@ const FindTherapist: React.FC = () => {
                 </p>
               </div>
 
+              {clientProfile && (
+                <p style={{ margin: "0 0 16px", fontSize: 13, color: "#16a34a" }}>
+                  Prijavljeni ste kao <strong>{clientProfile.full_name || clientProfile.email}</strong>
+                </p>
+              )}
+
               <div
                 style={{ display: "flex", flexDirection: "column", gap: 14 }}
               >
-                <div style={{ display: "flex", gap: 12 }}>
-                  <div style={{ flex: 1 }}>
-                    <label
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 600,
-                        color: "#334155",
-                      }}
-                    >
-                      Ime *
-                    </label>
-                    <input
-                      value={form.ime}
-                      onChange={(e) =>
-                        setForm({ ...form, ime: e.target.value })
-                      }
-                      style={inputStyle}
-                    />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <label
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 600,
-                        color: "#334155",
-                      }}
-                    >
-                      Prezime *
-                    </label>
-                    <input
-                      value={form.prezime}
-                      onChange={(e) =>
-                        setForm({ ...form, prezime: e.target.value })
-                      }
-                      style={inputStyle}
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label
-                    style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}
-                  >
-                    Email *
-                  </label>
-                  <input
-                    type="email"
-                    value={form.email}
-                    onChange={(e) =>
-                      setForm({ ...form, email: e.target.value })
-                    }
-                    style={inputStyle}
-                  />
-                </div>
+                {!clientProfile && (
+                  <>
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <label
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: "#334155",
+                          }}
+                        >
+                          Ime *
+                        </label>
+                        <input
+                          value={form.ime}
+                          onChange={(e) =>
+                            setForm({ ...form, ime: e.target.value })
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: "#334155",
+                          }}
+                        >
+                          Prezime *
+                        </label>
+                        <input
+                          value={form.prezime}
+                          onChange={(e) =>
+                            setForm({ ...form, prezime: e.target.value })
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label
+                        style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}
+                      >
+                        Email *
+                      </label>
+                      <input
+                        type="email"
+                        value={form.email}
+                        onChange={(e) =>
+                          setForm({ ...form, email: e.target.value })
+                        }
+                        style={inputStyle}
+                      />
+                    </div>
+                  </>
+                )}
                 <div>
                   <label
                     style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}
@@ -822,6 +863,14 @@ const FindTherapist: React.FC = () => {
               {confirmed.tenant_name} vas očekuje{" "}
               <strong>{formatDateTime(confirmed.pocetak)}</strong>.
             </p>
+            {clientProfile && (
+              <button
+                onClick={() => navigate("/client/dashboard")}
+                style={{ ...primaryBtn, marginTop: 20 }}
+              >
+                Vidi svoje termine
+              </button>
+            )}
           </div>
         )}
       </div>

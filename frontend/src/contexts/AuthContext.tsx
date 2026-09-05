@@ -318,8 +318,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const signInWithGoogle = async () => {
     const inviteToken = sessionStorage.getItem(INVITE_STORAGE_KEY);
     const redirectTo = inviteToken
-      ? `${window.location.origin}/?invite=${encodeURIComponent(inviteToken)}`
-      : window.location.origin;
+      ? `${window.location.origin}/therapist?invite=${encodeURIComponent(inviteToken)}`
+      : `${window.location.origin}/therapist`;
 
     await supabase.auth.signInWithOAuth({
       provider: "google",

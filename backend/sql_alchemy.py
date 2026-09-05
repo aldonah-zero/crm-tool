@@ -60,6 +60,23 @@ class UserProfile(Base):
 
 
 ############################################
+# Client Account (links Supabase Auth → a client identity, not tied to
+# any single tenant - a client's bookings are just Klijent rows across
+# any number of practices matching this account's email)
+############################################
+
+class ClientAccount(Base):
+    __tablename__ = "client_account"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    supabase_user_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, default=dt_datetime.utcnow)
+
+
+############################################
 # Core Tables
 ############################################
 

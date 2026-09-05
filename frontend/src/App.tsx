@@ -2,10 +2,14 @@ import React, { useState, useEffect } from "react";
 import { Routes, Route } from "react-router-dom";
 import { TableProvider } from "./contexts/TableContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { ClientAuthProvider } from "./contexts/ClientAuthContext";
 import AdminPanel from "./pages/AdminPanel";
 import Calendar from "./pages/Calendar";
 import AuthPage from "./pages/AuthPage";
 import FindTherapist from "./pages/FindTherapist";
+import LandingPage from "./pages/LandingPage";
+import ClientAuthPage from "./pages/ClientAuthPage";
+import ClientDashboard from "./pages/ClientDashboard";
 import "./App.css";
 import "./pages/Auth.css";
 
@@ -347,9 +351,33 @@ const AppContent: React.FC = () => {
 function App() {
   return (
     <Routes>
-      <Route path="/find-therapist" element={<FindTherapist />} />
+      <Route path="/" element={<LandingPage />} />
       <Route
-        path="/*"
+        path="/find-therapist"
+        element={
+          <ClientAuthProvider>
+            <FindTherapist />
+          </ClientAuthProvider>
+        }
+      />
+      <Route
+        path="/client"
+        element={
+          <ClientAuthProvider>
+            <ClientAuthPage />
+          </ClientAuthProvider>
+        }
+      />
+      <Route
+        path="/client/dashboard"
+        element={
+          <ClientAuthProvider>
+            <ClientDashboard />
+          </ClientAuthProvider>
+        }
+      />
+      <Route
+        path="/therapist/*"
         element={
           <AuthProvider>
             <AppContent />

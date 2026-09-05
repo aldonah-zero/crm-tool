@@ -31,6 +31,7 @@ const defaultWorkingHours = (): WorkingHours =>
   );
 
 const ClientProfileSettings: React.FC = () => {
+  const [practiceName, setPracticeName] = useState("");
   const [specialties, setSpecialties] = useState<string[]>([]);
   const [workingHours, setWorkingHours] = useState<WorkingHours>(
     defaultWorkingHours(),
@@ -47,6 +48,7 @@ const ClientProfileSettings: React.FC = () => {
     const load = async () => {
       try {
         const res = await axios.get(`${backendBase}/tenant/settings`);
+        setPracticeName(res.data.name || "");
         setSpecialties(res.data.specialties || []);
         if (
           res.data.working_hours &&
@@ -81,6 +83,7 @@ const ClientProfileSettings: React.FC = () => {
     setMessage(null);
     try {
       await axios.put(`${backendBase}/tenant/settings`, {
+        name: practiceName.trim() || null,
         specialties,
         working_hours: workingHours,
         default_price: defaultPrice ? Number(defaultPrice) : null,
@@ -126,6 +129,36 @@ const ClientProfileSettings: React.FC = () => {
         Ovo određuje da li i kada se vaša praksa pojavljuje u pretrazi
         "Pronađi terapeuta" za nove klijente.
       </p>
+
+      <label
+        style={{
+          fontSize: 13,
+          fontWeight: 600,
+          color: "#334155",
+          display: "block",
+          marginBottom: 8,
+        }}
+      >
+        Naziv prakse (ovo klijenti vide u pretrazi)
+      </label>
+      <input
+        value={practiceName}
+        onChange={(e) => setPracticeName(e.target.value)}
+        placeholder="Maja's Praksa"
+        style={{
+          width: "100%",
+          maxWidth: 320,
+          padding: "10px 12px",
+          borderRadius: 8,
+          border: "1px solid #e2e8f0",
+          fontSize: 13,
+          color: "#1e293b",
+          background: "#f8fafc",
+          marginBottom: 24,
+          boxSizing: "border-box",
+          display: "block",
+        }}
+      />
 
       <label
         style={{

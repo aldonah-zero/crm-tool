@@ -2470,6 +2470,7 @@ def compute_available_slots(tenant_id: int, database: Session, days: int = 14):
 
 
 class TenantSettingsUpdate(BaseModel):
+    name: str | None = None
     specialties: list[str] | None = None
     working_hours: dict | None = None
     default_price: float | None = None
@@ -2506,6 +2507,8 @@ def update_tenant_settings(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    if data.name is not None and data.name.strip():
+        tenant.name = data.name.strip()
     if data.specialties is not None:
         tenant.specialties = ",".join(s.strip() for s in data.specialties if s.strip())
     if data.working_hours is not None:
@@ -2662,23 +2665,6 @@ Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
         })
     except Exception as e:
         logger.error(f"Failed to send booking notification to therapist: {e}")
-
-
-@app.get("/public/debug-email", tags=["Public"])
-def debug_email_send(to: str):
-    """TEMPORARY - remove once email delivery is confirmed working.
-    Surfaces the raw Resend exception directly in the response, since
-    normal booking emails swallow send errors into server logs only."""
-    try:
-        result = resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": [to],
-            "subject": "Test email - PsihoApp debug",
-            "html": "<p>Ovo je test email.</p>",
-        })
-        return {"ok": True, "result": result, "api_key_set": bool(resend.api_key)}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "error_type": type(e).__name__, "api_key_set": bool(resend.api_key)}
 
 
 @app.post("/public/therapists/{tenant_id}/book", tags=["Public"])
@@ -2991,6 +2977,156 @@ def list_team_members(
         }
         for m in members
     ]
+
+############################################
+#
+#   Client Account endpoints (client-side login, separate from the
+#   therapist Auth section above - a client isn't scoped to any one
+#   tenant, so these use their own X-Client-ID header instead of
+#   X-Tenant-ID)
+#
+############################################
+
+def get_client_id(request: Request) -> int:
+    """Resolve the calling client account from the X-Client-ID header,
+    mirroring get_tenant_id's trust model for the therapist side."""
+    client_id = request.headers.get("X-Client-ID")
+
+    if not client_id:
+        raise HTTPException(status_code=400, detail="Client ID missing")
+
+    return int(client_id)
+
+
+class ClientProfileRequest(PydanticBaseModel):
+    supabase_user_id: str
+    email: str
+    full_name: str | None = None
+    phone: str | None = None
+
+
+@app.post("/client-auth/profile", tags=["ClientAuth"])
+def get_or_create_client_profile(
+        data: ClientProfileRequest,
+        database: Session = Depends(get_db)
+):
+    """Find-or-create a ClientAccount for the logged-in Supabase user -
+    mirrors /auth/login-profile's shape for the therapist side."""
+    account = database.query(ClientAccount).filter(
+        ClientAccount.supabase_user_id == data.supabase_user_id
+    ).first()
+
+    if not account:
+        account = ClientAccount(
+            supabase_user_id=data.supabase_user_id,
+            email=data.email,
+            full_name=data.full_name,
+            phone=data.phone,
+        )
+        database.add(account)
+        database.commit()
+        database.refresh(account)
+
+    return {
+        "client_id": account.id,
+        "email": account.email,
+        "full_name": account.full_name,
+        "phone": account.phone,
+    }
+
+
+@app.get("/client/appointments", tags=["ClientAuth"])
+def list_client_appointments(
+        client_id: int = Depends(get_client_id),
+        database: Session = Depends(get_db)
+):
+    """Every session booked under this client's email, across any number
+    of practices - a client's bookings are just Klijent rows matched by
+    email, the same join key the public guest-booking flow already uses."""
+    account = database.query(ClientAccount).filter(ClientAccount.id == client_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    klijenti = database.query(Klijent).filter(Klijent.email == account.email).all()
+    klijent_ids_by_tenant = {}
+    for k in klijenti:
+        klijent_ids_by_tenant[k.id] = k.tenant_id
+
+    if not klijent_ids_by_tenant:
+        return []
+
+    tenants = {
+        t.id: t.name for t in
+        database.query(Tenant).filter(Tenant.id.in_(set(klijent_ids_by_tenant.values()))).all()
+    }
+
+    links = database.query(SesijaKlijent).filter(
+        SesijaKlijent.klijent_id.in_(klijent_ids_by_tenant.keys())
+    ).all()
+    sesija_ids = [l.sesija_id for l in links]
+    sesija_to_klijent = {l.sesija_id: l.klijent_id for l in links}
+
+    sesije = database.query(Sesija).filter(Sesija.id.in_(sesija_ids)).all() if sesija_ids else []
+
+    result = [
+        {
+            "sesija_id": s.id,
+            "tenant_id": s.tenant_id,
+            "tenant_name": tenants.get(s.tenant_id, ""),
+            "pocetak": s.pocetak.isoformat(),
+            "kraj": s.kraj.isoformat(),
+            "cena": s.cena,
+            "status": s.status,
+        }
+        for s in sesije
+        if sesija_to_klijent.get(s.id) in klijent_ids_by_tenant
+    ]
+    result.sort(key=lambda r: r["pocetak"])
+    return result
+
+
+@app.post("/client/appointments/{sesija_id}/cancel", tags=["ClientAuth"])
+def cancel_client_appointment(
+        sesija_id: int,
+        client_id: int = Depends(get_client_id),
+        database: Session = Depends(get_db)
+):
+    account = database.query(ClientAccount).filter(ClientAccount.id == client_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    sesija = database.query(Sesija).filter(Sesija.id == sesija_id).first()
+    if not sesija:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    link = database.query(SesijaKlijent).filter(SesijaKlijent.sesija_id == sesija_id).first()
+    klijent = database.query(Klijent).filter(Klijent.id == link.klijent_id).first() if link else None
+
+    # Authorization check: this endpoint has no tenant header, so ownership
+    # is verified by matching the session's client to the requesting account.
+    if not klijent or klijent.email != account.email:
+        raise HTTPException(status_code=403, detail="Not your appointment")
+
+    sesija.status = "otkazano"
+    database.commit()
+
+    try:
+        therapist_emails = [
+            p.email for p in
+            database.query(UserProfile).filter(UserProfile.tenant_id == sesija.tenant_id).all()
+        ]
+        if therapist_emails:
+            resend.Emails.send({
+                "from": "PsihoApp <noreply@hrioapp.com>",
+                "to": therapist_emails,
+                "subject": f"🗑️ Klijent je otkazao termin - {klijent.ime} {klijent.prezime}",
+                "html": f"<p>{klijent.ime} {klijent.prezime} je otkazao/la termin zakazan za {format_date_long(sesija.pocetak)} u {format_time(sesija.pocetak)}.</p>",
+            })
+    except Exception as e:
+        logger.error(f"Failed to send cancellation notice to therapist: {e}")
+
+    return {"sesija_id": sesija.id, "status": sesija.status}
+
 
 ############################################
 # Maintaining the server
