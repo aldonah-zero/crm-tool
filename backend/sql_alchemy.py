@@ -34,6 +34,11 @@ class Tenant(Base):
     working_hours: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON, keyed by weekday "0"-"6"
     default_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Billing - free trial, then a manually-confirmed monthly subscription
+    # (no card processor yet; see /internal/mark-subscription-paid).
+    trial_ends_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, nullable=True)
+    subscription_paid_until: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, nullable=True)
+
     klijenti = relationship("Klijent", backref="tenant")
     grupe = relationship("Grupa", backref="tenant")
     sesije = relationship("Sesija", backref="tenant")
@@ -94,6 +99,21 @@ class Klijent(Base):
     sesijaklijent = relationship("SesijaKlijent", back_populates="klijent")
     cena_1 = relationship("Cena", back_populates="klijent_1")
     grupa_clanstva = relationship("GrupaKlijent", back_populates="klijent")
+
+
+class KlijentNapomena(Base):
+    """A therapist's freeform notes on a client's progress - a timestamped,
+    optionally-categorized journal, separate from session records."""
+    __tablename__ = "klijent_napomena"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False)
+    klijent_id: Mapped[int] = mapped_column(ForeignKey("klijent.id"), nullable=False)
+
+    tekst: Mapped[str] = mapped_column(Text)
+    kategorija: Mapped[str] = mapped_column(String(50), default="opste")
+    author_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[dt_datetime] = mapped_column(DateTime, default=dt_datetime.utcnow)
 
 
 class Grupa(Base):

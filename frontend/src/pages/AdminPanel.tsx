@@ -150,6 +150,7 @@ const tableConfigs: Record<string, any> = {
       showPagination: true,
       rowsPerPage: 10,
       actionButtons: true,
+      showNotesButton: true,
       columns: [
         {
           label: "Ime",

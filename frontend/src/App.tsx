@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import axios from "axios";
 import { Routes, Route } from "react-router-dom";
 import { TableProvider } from "./contexts/TableContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
@@ -10,8 +11,22 @@ import FindTherapist from "./pages/FindTherapist";
 import LandingPage from "./pages/LandingPage";
 import ClientAuthPage from "./pages/ClientAuthPage";
 import ClientDashboard from "./pages/ClientDashboard";
+import SubscriptionPaywall from "./pages/SubscriptionPaywall";
 import "./App.css";
 import "./pages/Auth.css";
+
+interface SubscriptionInfo {
+  status: "trial" | "active" | "expired";
+  active: boolean;
+  trial_ends_at: string | null;
+  subscription_paid_until: string | null;
+  payment_instructions: {
+    amount_rsd: number;
+    bank_account: string;
+    recipient: string;
+    reference: string;
+  };
+}
 
 // ============================================
 // Main app content (shown when authenticated)
@@ -21,6 +36,8 @@ const AppContent: React.FC = () => {
   const [activePage, setActivePage] = useState<"admin" | "calendar">("admin");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
+  const [subLoading, setSubLoading] = useState(true);
 
   useEffect(() => {
     const checkMobile = () => {
@@ -33,6 +50,41 @@ const AppContent: React.FC = () => {
     window.addEventListener("resize", checkMobile);
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
+
+  const backendBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+  const loadSubscription = React.useCallback(() => {
+    return axios
+      .get(`${backendBase}/tenant/subscription`)
+      .then((res) => setSubscription(res.data))
+      .catch((err) => {
+        console.error("Error loading subscription status:", err);
+        setSubscription(null);
+      })
+      .finally(() => setSubLoading(false));
+  }, [backendBase]);
+
+  useEffect(() => {
+    if (!profile) return;
+    loadSubscription();
+  }, [profile, loadSubscription]);
+
+  // If the trial/subscription lapses mid-session, the next gated API call
+  // 402s - re-check status so the paywall takes over instead of every
+  // component just showing its own generic error.
+  useEffect(() => {
+    if (!profile) return;
+    const interceptor = axios.interceptors.response.use(
+      (res) => res,
+      (err) => {
+        if (err?.response?.status === 402) {
+          loadSubscription();
+        }
+        return Promise.reject(err);
+      },
+    );
+    return () => axios.interceptors.response.eject(interceptor);
+  }, [profile, loadSubscription]);
 
   // Show loading spinner while checking auth
   if (loading) {
@@ -83,6 +135,46 @@ const AppContent: React.FC = () => {
   if (!user || !profile) {
     return <AuthPage />;
   }
+
+  // Still checking billing status
+  if (subLoading) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minHeight: "100vh",
+          background: "#0f172a",
+        }}
+      >
+        <svg width="44" height="44" viewBox="0 0 44 44">
+          <circle cx="22" cy="22" r="18" fill="none" stroke="#1e293b" strokeWidth="3.5" />
+          <circle cx="22" cy="22" r="18" fill="none" stroke="#6366f1" strokeWidth="3.5" strokeDasharray="80 33" strokeLinecap="round">
+            <animateTransform attributeName="transform" type="rotate" from="0 22 22" to="360 22 22" dur="0.7s" repeatCount="indefinite" />
+          </circle>
+        </svg>
+      </div>
+    );
+  }
+
+  // Trial ended and no payment on file — block access to the app
+  if (subscription && !subscription.active) {
+    return (
+      <SubscriptionPaywall
+        everPaid={!!subscription.subscription_paid_until}
+        payment={subscription.payment_instructions}
+        onSignOut={signOut}
+      />
+    );
+  }
+
+  const trialDaysLeft =
+    subscription?.status === "trial" && subscription.trial_ends_at
+      ? Math.ceil(
+          (new Date(subscription.trial_ends_at).getTime() - Date.now()) / 86400000,
+        )
+      : null;
 
   // Logged in — show app
   const handleNavClick = (page: "admin" | "calendar") => {
@@ -337,6 +429,25 @@ const AppContent: React.FC = () => {
 
         {/* Main Content */}
         <main className="psych-main">
+          {trialDaysLeft !== null && trialDaysLeft <= 5 && (
+            <div
+              style={{
+                background: "linear-gradient(135deg, #fef3c7, #fde68a)",
+                border: "1px solid #fbbf24",
+                borderRadius: 12,
+                padding: "12px 18px",
+                marginBottom: 20,
+                fontSize: 13,
+                fontWeight: 600,
+                color: "#92400e",
+              }}
+            >
+              {trialDaysLeft <= 0
+                ? "Vaš probni period ističe danas."
+                : `Vaš probni period ističe za ${trialDaysLeft} ${trialDaysLeft === 1 ? "dan" : "dana"}.`}{" "}
+              Obnovite pretplatu da izbegnete prekid pristupa.
+            </div>
+          )}
           {activePage === "admin" && <AdminPanel />}
           {activePage === "calendar" && <Calendar />}
         </main>

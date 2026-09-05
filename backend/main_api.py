@@ -69,6 +69,8 @@ def run_light_migrations(engine):
         "ALTER TABLE tenant ADD COLUMN working_hours TEXT",
         "ALTER TABLE tenant ADD COLUMN default_price FLOAT",
         "ALTER TABLE sesija ADD COLUMN reminder_sent BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE tenant ADD COLUMN trial_ends_at TIMESTAMP",
+        "ALTER TABLE tenant ADD COLUMN subscription_paid_until TIMESTAMP",
     ]
     with engine.connect() as conn:
         for stmt in statements:
@@ -77,6 +79,20 @@ def run_light_migrations(engine):
                 conn.commit()
             except (OperationalError, ProgrammingError):
                 conn.rollback()
+
+        # Grandfather every tenant that existed before billing was added -
+        # give them a fresh 30-day trial from now instead of locking them
+        # out immediately. Only touches rows still NULL, so it's a no-op
+        # on every startup after the first.
+        try:
+            trial_end = datetime.utcnow() + timedelta(days=30)
+            conn.execute(
+                text("UPDATE tenant SET trial_ends_at = :end WHERE trial_ends_at IS NULL"),
+                {"end": trial_end},
+            )
+            conn.commit()
+        except (OperationalError, ProgrammingError):
+            conn.rollback()
 
 
 def init_db():
@@ -474,6 +490,109 @@ def get_db():
     finally:
         db.close()
 
+
+# Monthly subscription price shown on the paywall, and the manual bank
+# transfer details a therapist pays into. No card processor yet - see
+# /internal/mark-subscription-paid for how a payment actually gets applied.
+SUBSCRIPTION_PRICE_RSD = int(os.getenv("SUBSCRIPTION_PRICE_RSD", "1500"))
+SUBSCRIPTION_BANK_ACCOUNT = os.getenv("SUBSCRIPTION_BANK_ACCOUNT", "")
+SUBSCRIPTION_BANK_RECIPIENT = os.getenv("SUBSCRIPTION_BANK_RECIPIENT", "PsihoApp")
+
+# Secret for administrative billing actions (marking a tenant as paid).
+# Set ADMIN_SECRET in production; unset = the endpoint always 401s.
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
+
+
+def has_active_subscription(tenant: "Tenant", now: datetime | None = None) -> bool:
+    now = now or datetime.utcnow()
+    if tenant.trial_ends_at and now < tenant.trial_ends_at:
+        return True
+    if tenant.subscription_paid_until and now < tenant.subscription_paid_until:
+        return True
+    return False
+
+
+def require_active_subscription(
+        tenant_id: int = Depends(get_tenant_id),
+        database: Session = Depends(get_db),
+) -> int:
+    """Drop-in replacement for get_tenant_id on the core practice-management
+    endpoints (clients/groups/sessions/payments) - same return value, but
+    also 402s once the trial has ended and no payment has been confirmed.
+    Deliberately not used on /tenant/settings, /auth/*, or the public
+    client-facing endpoints, which stay reachable regardless of billing."""
+    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if not has_active_subscription(tenant):
+        raise HTTPException(
+            status_code=402,
+            detail="Vaš probni period ili pretplata je istekla. Obnovite pretplatu da nastavite.",
+        )
+    return tenant_id
+
+
+@app.get("/tenant/subscription", tags=["Tenant"])
+def get_tenant_subscription(
+        tenant_id: int = Depends(get_tenant_id),
+        database: Session = Depends(get_db),
+):
+    """Reachable even when the subscription has lapsed - the frontend needs
+    this to render the paywall and payment instructions."""
+    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    now = datetime.utcnow()
+    active = has_active_subscription(tenant, now)
+    if tenant.subscription_paid_until and now < tenant.subscription_paid_until:
+        current_status = "active"
+    elif tenant.trial_ends_at and now < tenant.trial_ends_at:
+        current_status = "trial"
+    else:
+        current_status = "expired"
+
+    return {
+        "status": current_status,
+        "active": active,
+        "trial_ends_at": tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
+        "subscription_paid_until": tenant.subscription_paid_until.isoformat() if tenant.subscription_paid_until else None,
+        "payment_instructions": {
+            "amount_rsd": SUBSCRIPTION_PRICE_RSD,
+            "bank_account": SUBSCRIPTION_BANK_ACCOUNT,
+            "recipient": SUBSCRIPTION_BANK_RECIPIENT,
+            "reference": f"TENANT-{tenant_id}",
+        },
+    }
+
+
+@app.post("/internal/mark-subscription-paid", tags=["System"])
+def mark_subscription_paid(
+        tenant_id: int = Body(...),
+        months: int = Body(1),
+        x_admin_secret: str = Header(None, alias="X-Admin-Secret"),
+        database: Session = Depends(get_db),
+):
+    """Manually called by the app owner after confirming a bank transfer
+    arrived. Extends from whichever is later - now, or the tenant's current
+    paid-until date - so renewing early doesn't lose the remaining days."""
+    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    now = datetime.utcnow()
+    base = tenant.subscription_paid_until if tenant.subscription_paid_until and tenant.subscription_paid_until > now else now
+    tenant.subscription_paid_until = base + timedelta(days=30 * months)
+    database.commit()
+
+    return {
+        "tenant_id": tenant_id,
+        "subscription_paid_until": tenant.subscription_paid_until.isoformat(),
+    }
+
 ############################################
 #
 #   Global API endpoints
@@ -493,7 +612,7 @@ def health_check():
 
 @app.get("/statistics", tags=["System"])
 def get_statistics(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     stats = {}
@@ -516,7 +635,7 @@ def get_statistics(
 
 @app.get("/cena/", response_model=None, tags=["Cena"])
 def get_all_cena(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ) -> list:
@@ -557,7 +676,7 @@ def get_all_cena(
 
 @app.get("/cena/count/", response_model=None, tags=["Cena"])
 def get_count_cena(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     return {"count": database.query(Cena).filter(Cena.tenant_id == tenant_id).count()}
@@ -565,7 +684,7 @@ def get_count_cena(
 
 @app.get("/cena/paginated/", response_model=None, tags=["Cena"])
 def get_paginated_cena(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     detailed: bool = False,
@@ -578,7 +697,7 @@ def get_paginated_cena(
 
 @app.get("/cena/search/", response_model=None, tags=["Cena"])
 def search_cena(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> list:
     return database.query(Cena).filter(Cena.tenant_id == tenant_id).all()
@@ -587,7 +706,7 @@ def search_cena(
 @app.get("/cena/{cena_id}/", response_model=None, tags=["Cena"])
 async def get_cena(
     cena_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> Cena:
     db_cena = database.query(Cena).filter(Cena.id == cena_id, Cena.tenant_id == tenant_id).first()
@@ -599,7 +718,7 @@ async def get_cena(
 @app.post("/cena/", response_model=None, tags=["Cena"])
 async def create_cena(
     cena_data: CenaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> Cena:
 
@@ -639,7 +758,7 @@ async def create_cena(
 @app.post("/cena/bulk/", response_model=None, tags=["Cena"])
 async def bulk_create_cena(
     items: list[CenaCreate],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     created_items = []
@@ -679,7 +798,7 @@ async def bulk_create_cena(
 @app.delete("/cena/bulk/", response_model=None, tags=["Cena"])
 async def bulk_delete_cena(
     ids: list[int],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     deleted_count = 0
@@ -701,7 +820,7 @@ async def bulk_delete_cena(
 async def update_cena(
     cena_id: int,
     cena_data: CenaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> Cena:
     db_cena = database.query(Cena).filter(Cena.id == cena_id, Cena.tenant_id == tenant_id).first()
@@ -733,7 +852,7 @@ async def update_cena(
 @app.delete("/cena/{cena_id}/", response_model=None, tags=["Cena"])
 async def delete_cena(
     cena_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_cena = database.query(Cena).filter(Cena.id == cena_id, Cena.tenant_id == tenant_id).first()
@@ -752,7 +871,7 @@ async def delete_cena(
 
 @app.get("/sesijagrupa/", response_model=None, tags=["SesijaGrupa"])
 def get_all_sesijagrupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ) -> list:
@@ -791,7 +910,7 @@ def get_all_sesijagrupa(
 
 @app.get("/sesijagrupa/count/", response_model=None, tags=["SesijaGrupa"])
 def get_count_sesijagrupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     return {"count": database.query(SesijaGrupa).filter(SesijaGrupa.tenant_id == tenant_id).count()}
@@ -799,7 +918,7 @@ def get_count_sesijagrupa(
 
 @app.get("/sesijagrupa/paginated/", response_model=None, tags=["SesijaGrupa"])
 def get_paginated_sesijagrupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     detailed: bool = False,
@@ -812,7 +931,7 @@ def get_paginated_sesijagrupa(
 
 @app.get("/sesijagrupa/search/", response_model=None, tags=["SesijaGrupa"])
 def search_sesijagrupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> list:
     return database.query(SesijaGrupa).filter(SesijaGrupa.tenant_id == tenant_id).all()
@@ -821,7 +940,7 @@ def search_sesijagrupa(
 @app.get("/sesijagrupa/{sesijagrupa_id}/", response_model=None, tags=["SesijaGrupa"])
 async def get_sesijagrupa(
     sesijagrupa_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaGrupa:
     db_sesijagrupa = database.query(SesijaGrupa).filter(SesijaGrupa.id == sesijagrupa_id, SesijaGrupa.tenant_id == tenant_id).first()
@@ -833,7 +952,7 @@ async def get_sesijagrupa(
 @app.post("/sesijagrupa/", response_model=None, tags=["SesijaGrupa"])
 async def create_sesijagrupa(
     sesijagrupa_data: SesijaGrupaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaGrupa:
 
@@ -869,7 +988,7 @@ async def create_sesijagrupa(
 @app.post("/sesijagrupa/bulk/", response_model=None, tags=["SesijaGrupa"])
 async def bulk_create_sesijagrupa(
     items: list[SesijaGrupaCreate],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     created_items = []
@@ -905,7 +1024,7 @@ async def bulk_create_sesijagrupa(
 @app.delete("/sesijagrupa/bulk/", response_model=None, tags=["SesijaGrupa"])
 async def bulk_delete_sesijagrupa(
     ids: list[int],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     deleted_count = 0
@@ -927,7 +1046,7 @@ async def bulk_delete_sesijagrupa(
 async def update_sesijagrupa(
     sesijagrupa_id: int,
     sesijagrupa_data: SesijaGrupaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaGrupa:
     db_sesijagrupa = database.query(SesijaGrupa).filter(SesijaGrupa.id == sesijagrupa_id, SesijaGrupa.tenant_id == tenant_id).first()
@@ -954,7 +1073,7 @@ async def update_sesijagrupa(
 @app.delete("/sesijagrupa/{sesijagrupa_id}/", response_model=None, tags=["SesijaGrupa"])
 async def delete_sesijagrupa(
     sesijagrupa_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_sesijagrupa = database.query(SesijaGrupa).filter(SesijaGrupa.id == sesijagrupa_id, SesijaGrupa.tenant_id == tenant_id).first()
@@ -973,7 +1092,7 @@ async def delete_sesijagrupa(
 
 @app.get("/sesijaklijent/", response_model=None, tags=["SesijaKlijent"])
 def get_all_sesijaklijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ) -> list:
@@ -1012,7 +1131,7 @@ def get_all_sesijaklijent(
 
 @app.get("/sesijaklijent/count/", response_model=None, tags=["SesijaKlijent"])
 def get_count_sesijaklijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     return {"count": database.query(SesijaKlijent).filter(SesijaKlijent.tenant_id == tenant_id).count()}
@@ -1020,7 +1139,7 @@ def get_count_sesijaklijent(
 
 @app.get("/sesijaklijent/paginated/", response_model=None, tags=["SesijaKlijent"])
 def get_paginated_sesijaklijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     detailed: bool = False,
@@ -1033,7 +1152,7 @@ def get_paginated_sesijaklijent(
 
 @app.get("/sesijaklijent/search/", response_model=None, tags=["SesijaKlijent"])
 def search_sesijaklijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> list:
     return database.query(SesijaKlijent).filter(SesijaKlijent.tenant_id == tenant_id).all()
@@ -1042,7 +1161,7 @@ def search_sesijaklijent(
 @app.get("/sesijaklijent/{sesijaklijent_id}/", response_model=None, tags=["SesijaKlijent"])
 async def get_sesijaklijent(
     sesijaklijent_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaKlijent:
     db_sesijaklijent = database.query(SesijaKlijent).filter(SesijaKlijent.id == sesijaklijent_id, SesijaKlijent.tenant_id == tenant_id).first()
@@ -1054,7 +1173,7 @@ async def get_sesijaklijent(
 @app.post("/sesijaklijent/", response_model=None, tags=["SesijaKlijent"])
 async def create_sesijaklijent(
     sesijaklijent_data: SesijaKlijentCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaKlijent:
 
@@ -1090,7 +1209,7 @@ async def create_sesijaklijent(
 @app.post("/sesijaklijent/bulk/", response_model=None, tags=["SesijaKlijent"])
 async def bulk_create_sesijaklijent(
     items: list[SesijaKlijentCreate],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     created_items = []
@@ -1126,7 +1245,7 @@ async def bulk_create_sesijaklijent(
 @app.delete("/sesijaklijent/bulk/", response_model=None, tags=["SesijaKlijent"])
 async def bulk_delete_sesijaklijent(
     ids: list[int],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     deleted_count = 0
@@ -1148,7 +1267,7 @@ async def bulk_delete_sesijaklijent(
 async def update_sesijaklijent(
     sesijaklijent_id: int,
     sesijaklijent_data: SesijaKlijentCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> SesijaKlijent:
     db_sesijaklijent = database.query(SesijaKlijent).filter(SesijaKlijent.id == sesijaklijent_id, SesijaKlijent.tenant_id == tenant_id).first()
@@ -1175,7 +1294,7 @@ async def update_sesijaklijent(
 @app.delete("/sesijaklijent/{sesijaklijent_id}/", response_model=None, tags=["SesijaKlijent"])
 async def delete_sesijaklijent(
     sesijaklijent_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_sesijaklijent = database.query(SesijaKlijent).filter(SesijaKlijent.id == sesijaklijent_id, SesijaKlijent.tenant_id == tenant_id).first()
@@ -1194,7 +1313,7 @@ async def delete_sesijaklijent(
 
 @app.get("/grupaklijent/", response_model=None, tags=["GrupaKlijent"])
 def get_all_grupaklijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ) -> list:
@@ -1234,7 +1353,7 @@ def get_all_grupaklijent(
 @app.get("/grupaklijent/by-grupa/{grupa_id}/", response_model=None, tags=["GrupaKlijent"])
 def get_grupaklijent_by_grupa(
     grupa_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> list:
     gk_list = database.query(GrupaKlijent).filter(GrupaKlijent.grupa_id == grupa_id, GrupaKlijent.tenant_id == tenant_id).all()
@@ -1257,7 +1376,7 @@ def get_grupaklijent_by_grupa(
 @app.post("/grupaklijent/", response_model=None, tags=["GrupaKlijent"])
 async def create_grupaklijent(
     data: GrupaKlijentCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     if data.grupa_id is None:
@@ -1295,7 +1414,7 @@ async def create_grupaklijent(
 @app.delete("/grupaklijent/{grupaklijent_id}/", response_model=None, tags=["GrupaKlijent"])
 async def delete_grupaklijent(
     grupaklijent_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_gk = database.query(GrupaKlijent).filter(GrupaKlijent.id == grupaklijent_id, GrupaKlijent.tenant_id == tenant_id).first()
@@ -1310,7 +1429,7 @@ async def delete_grupaklijent(
 async def sync_grupa_members(
     grupa_id: int,
     klijent_ids: list[int] = Body(...),
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_grupa = database.query(Grupa).filter(Grupa.id == grupa_id, Grupa.tenant_id == tenant_id).first()
@@ -1342,7 +1461,7 @@ async def sync_grupa_members(
 
 @app.get("/sesija/", tags=["Sesija"])
 def get_all_sesija(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ):
@@ -1418,7 +1537,7 @@ def get_all_sesija(
 
 @app.get("/sesija/count/", tags=["Sesija"])
 def get_count_sesija(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return {"count": database.query(Sesija).filter(Sesija.tenant_id == tenant_id).count()}
@@ -1426,7 +1545,7 @@ def get_count_sesija(
 
 @app.get("/sesija/paginated/", tags=["Sesija"])
 def get_paginated_sesija(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     detailed: bool = False,
@@ -1440,7 +1559,7 @@ def get_paginated_sesija(
 
 @app.get("/sesija/search/", tags=["Sesija"])
 def search_sesija(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return database.query(Sesija).filter(Sesija.tenant_id == tenant_id).all()
@@ -1451,7 +1570,7 @@ def search_sesija(
 # ============================================
 @app.get("/sesija/export-excel/", response_model=None, tags=["Sesija"])
 def export_sesija_excel(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     from datetime import date as date_type
@@ -1812,7 +1931,7 @@ def export_sesija_excel(
 @app.get("/sesija/{sesija_id}/", tags=["Sesija"])
 async def get_sesija(
     sesija_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_sesija = database.query(Sesija).filter(Sesija.id == sesija_id, Sesija.tenant_id == tenant_id).first()
@@ -1834,7 +1953,7 @@ async def get_sesija(
 @app.post("/sesija/", tags=["Sesija"])
 async def create_sesija(
     sesija_data: SesijaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_sesija = Sesija(
@@ -1882,7 +2001,7 @@ async def create_sesija(
 @app.post("/sesija/bulk/", response_model=None, tags=["Sesija"])
 async def bulk_create_sesija(
     items: list[SesijaCreate],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     created_items = []
@@ -1915,7 +2034,7 @@ async def bulk_create_sesija(
 @app.delete("/sesija/bulk/", response_model=None, tags=["Sesija"])
 async def bulk_delete_sesija(
     ids: list[int],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> dict:
     deleted_count = 0
@@ -1940,7 +2059,7 @@ async def bulk_delete_sesija(
 async def mark_sesija_paid(
     sesija_id: int,
     payment_data: dict = Body(...),
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     from datetime import date as date_type
@@ -1993,7 +2112,7 @@ async def mark_sesija_paid(
 async def update_sesija(
     sesija_id: int,
     sesija_data: SesijaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ) -> Sesija:
 
@@ -2104,7 +2223,7 @@ async def update_sesija(
 @app.delete("/sesija/{sesija_id}/", tags=["Sesija"])
 async def delete_sesija(
     sesija_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_sesija = database.query(Sesija).filter(Sesija.id == sesija_id, Sesija.tenant_id == tenant_id).first()
@@ -2121,7 +2240,7 @@ async def delete_sesija(
 
 @app.get("/grupa/", tags=["Grupa"])
 def get_all_grupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ):
@@ -2162,7 +2281,7 @@ def get_all_grupa(
 
 @app.get("/grupa/count/", tags=["Grupa"])
 def get_count_grupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return {"count": database.query(Grupa).filter(Grupa.tenant_id == tenant_id).count()}
@@ -2170,7 +2289,7 @@ def get_count_grupa(
 
 @app.get("/grupa/paginated/", tags=["Grupa"])
 def get_paginated_grupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     database: Session = Depends(get_db)
@@ -2183,7 +2302,7 @@ def get_paginated_grupa(
 
 @app.get("/grupa/search/", tags=["Grupa"])
 def search_grupa(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return database.query(Grupa).filter(Grupa.tenant_id == tenant_id).all()
@@ -2192,7 +2311,7 @@ def search_grupa(
 @app.get("/grupa/{grupa_id}/", tags=["Grupa"])
 def get_grupa(
     grupa_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_grupa = database.query(Grupa).filter(Grupa.id == grupa_id, Grupa.tenant_id == tenant_id).first()
@@ -2204,7 +2323,7 @@ def get_grupa(
 @app.post("/grupa/", tags=["Grupa"])
 def create_grupa(
     grupa_data: GrupaCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_grupa = Grupa(
@@ -2231,7 +2350,7 @@ def create_grupa(
 @app.delete("/grupa/{grupa_id}/", tags=["Grupa"])
 def delete_grupa(
     grupa_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_grupa = database.query(Grupa).filter(Grupa.id == grupa_id, Grupa.tenant_id == tenant_id).first()
@@ -2250,7 +2369,7 @@ def delete_grupa(
 
 @app.get("/klijent/", tags=["Klijent"])
 def get_all_klijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     detailed: bool = False,
     database: Session = Depends(get_db)
 ):
@@ -2277,7 +2396,7 @@ def get_all_klijent(
 
 @app.get("/klijent/count/", tags=["Klijent"])
 def get_count_klijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return {"count": database.query(Klijent).filter(Klijent.tenant_id == tenant_id).count()}
@@ -2285,7 +2404,7 @@ def get_count_klijent(
 
 @app.get("/klijent/paginated/", tags=["Klijent"])
 def get_paginated_klijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     skip: int = 0,
     limit: int = 100,
     database: Session = Depends(get_db)
@@ -2298,7 +2417,7 @@ def get_paginated_klijent(
 
 @app.get("/klijent/search/", tags=["Klijent"])
 def search_klijent(
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     return database.query(Klijent).filter(Klijent.tenant_id == tenant_id).all()
@@ -2307,7 +2426,7 @@ def search_klijent(
 @app.get("/klijent/{klijent_id}/", tags=["Klijent"])
 def get_klijent(
     klijent_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_klijent = database.query(Klijent).filter(Klijent.id == klijent_id, Klijent.tenant_id == tenant_id).first()
@@ -2319,7 +2438,7 @@ def get_klijent(
 @app.post("/klijent/", tags=["Klijent"])
 def create_klijent(
     klijent_data: KlijentCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_klijent = Klijent(
@@ -2338,7 +2457,7 @@ def create_klijent(
 @app.post("/klijent/bulk/", tags=["Klijent"])
 def bulk_create_klijent(
     items: list[KlijentCreate],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     created_ids = []
@@ -2365,7 +2484,7 @@ def bulk_create_klijent(
 @app.delete("/klijent/bulk/", tags=["Klijent"])
 def bulk_delete_klijent(
     ids: list[int],
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     deleted = 0
@@ -2382,7 +2501,7 @@ def bulk_delete_klijent(
 def update_klijent(
     klijent_id: int,
     klijent_data: KlijentCreate,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_klijent = database.query(Klijent).filter(Klijent.id == klijent_id, Klijent.tenant_id == tenant_id).first()
@@ -2402,7 +2521,7 @@ def update_klijent(
 @app.delete("/klijent/{klijent_id}/", tags=["Klijent"])
 def delete_klijent(
     klijent_id: int,
-    tenant_id: int = Depends(get_tenant_id),
+    tenant_id: int = Depends(require_active_subscription),
     database: Session = Depends(get_db)
 ):
     db_klijent = database.query(Klijent).filter(Klijent.id == klijent_id, Klijent.tenant_id == tenant_id).first()
@@ -2411,6 +2530,135 @@ def delete_klijent(
     database.delete(db_klijent)
     database.commit()
     return {"message": "Deleted", "id": klijent_id}
+
+
+############################################
+#
+#   Client Notes & Progress
+#
+############################################
+
+NAPOMENA_KATEGORIJE = {"opste", "napredak", "cilj", "upozorenje"}
+
+
+class KlijentNapomenaCreate(BaseModel):
+    tekst: str
+    kategorija: str = "opste"
+    author_name: str | None = None
+
+
+def _napomena_payload(n: KlijentNapomena) -> dict:
+    return {
+        "id": n.id,
+        "klijent_id": n.klijent_id,
+        "tekst": n.tekst,
+        "kategorija": n.kategorija,
+        "author_name": n.author_name,
+        "created_at": n.created_at.isoformat(),
+    }
+
+
+@app.get("/klijent/{klijent_id}/napomene", tags=["Klijent"])
+def list_klijent_napomene(
+        klijent_id: int,
+        tenant_id: int = Depends(require_active_subscription),
+        database: Session = Depends(get_db),
+):
+    klijent = database.query(Klijent).filter(
+        Klijent.id == klijent_id, Klijent.tenant_id == tenant_id
+    ).first()
+    if not klijent:
+        raise HTTPException(status_code=404, detail="Klijent not found")
+
+    notes = database.query(KlijentNapomena).filter(
+        KlijentNapomena.klijent_id == klijent_id, KlijentNapomena.tenant_id == tenant_id
+    ).order_by(KlijentNapomena.created_at.desc()).all()
+    return [_napomena_payload(n) for n in notes]
+
+
+@app.post("/klijent/{klijent_id}/napomene", tags=["Klijent"])
+def create_klijent_napomena(
+        klijent_id: int,
+        data: KlijentNapomenaCreate,
+        tenant_id: int = Depends(require_active_subscription),
+        database: Session = Depends(get_db),
+):
+    klijent = database.query(Klijent).filter(
+        Klijent.id == klijent_id, Klijent.tenant_id == tenant_id
+    ).first()
+    if not klijent:
+        raise HTTPException(status_code=404, detail="Klijent not found")
+    if not data.tekst.strip():
+        raise HTTPException(status_code=400, detail="Napomena ne može biti prazna")
+
+    note = KlijentNapomena(
+        tenant_id=tenant_id,
+        klijent_id=klijent_id,
+        tekst=data.tekst.strip(),
+        kategorija=data.kategorija if data.kategorija in NAPOMENA_KATEGORIJE else "opste",
+        author_name=data.author_name,
+    )
+    database.add(note)
+    database.commit()
+    database.refresh(note)
+    return _napomena_payload(note)
+
+
+@app.delete("/klijent/{klijent_id}/napomene/{napomena_id}", tags=["Klijent"])
+def delete_klijent_napomena(
+        klijent_id: int,
+        napomena_id: int,
+        tenant_id: int = Depends(require_active_subscription),
+        database: Session = Depends(get_db),
+):
+    note = database.query(KlijentNapomena).filter(
+        KlijentNapomena.id == napomena_id,
+        KlijentNapomena.klijent_id == klijent_id,
+        KlijentNapomena.tenant_id == tenant_id,
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Napomena not found")
+    database.delete(note)
+    database.commit()
+    return {"message": "Deleted", "id": napomena_id}
+
+
+@app.get("/klijent/{klijent_id}/sesije", tags=["Klijent"])
+def list_klijent_sesije(
+        klijent_id: int,
+        tenant_id: int = Depends(require_active_subscription),
+        database: Session = Depends(get_db),
+):
+    """A client's session history, for the progress view - reuses the
+    SesijaKlijent links rather than trusting a client-supplied filter."""
+    klijent = database.query(Klijent).filter(
+        Klijent.id == klijent_id, Klijent.tenant_id == tenant_id
+    ).first()
+    if not klijent:
+        raise HTTPException(status_code=404, detail="Klijent not found")
+
+    sesija_ids = [
+        row.sesija_id for row in database.query(SesijaKlijent).filter(
+            SesijaKlijent.klijent_id == klijent_id, SesijaKlijent.tenant_id == tenant_id
+        ).all()
+    ]
+    sessions = (
+        database.query(Sesija)
+        .filter(Sesija.id.in_(sesija_ids), Sesija.tenant_id == tenant_id)
+        .order_by(Sesija.pocetak.desc())
+        .all()
+        if sesija_ids else []
+    )
+    return [
+        {
+            "id": s.id,
+            "pocetak": s.pocetak.isoformat(),
+            "kraj": s.kraj.isoformat(),
+            "cena": s.cena,
+            "status": s.status,
+        }
+        for s in sessions
+    ]
 
 
 ############################################
@@ -2924,7 +3172,10 @@ def register_profile(
             "tenant_name": tenant.name if tenant else ""
         }
 
-    new_tenant = Tenant(name=data.practice_name)
+    new_tenant = Tenant(
+        name=data.practice_name,
+        trial_ends_at=datetime.utcnow() + timedelta(days=30),
+    )
     database.add(new_tenant)
     database.flush()
 
@@ -2961,7 +3212,7 @@ def login_profile(
     ).first()
 
     if not profile:
-        tenant = Tenant(name="Default")
+        tenant = Tenant(name="Default", trial_ends_at=datetime.utcnow() + timedelta(days=30))
         database.add(tenant)
         database.flush()
 

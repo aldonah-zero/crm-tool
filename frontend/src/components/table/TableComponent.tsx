@@ -1,9 +1,11 @@
 import React, { CSSProperties, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { createPortal } from "react-dom";
+import { AnimatePresence } from "framer-motion";
 import { useTableContext } from "../../contexts/TableContext";
 import { ColumnFilter } from "./ColumnFilter";
 import { ColumnSort } from "./ColumnSort";
+import ClientNotesModal from "../ClientNotesModal";
 import "./TableComponent.css";
 
 interface TableColumn {
@@ -28,6 +30,7 @@ interface TableOptions {
   rowsPerPage?: number;
   showPaymentButton?: boolean;
   showExportButton?: boolean;
+  showNotesButton?: boolean;
   columns?: Array<
     | {
         field: string;
@@ -175,6 +178,9 @@ export const TableComponent: React.FC<Props> = ({
     }, 200);
   };
 
+  // Client notes / progress modal state
+  const [notesKlijent, setNotesKlijent] = useState<any | null>(null);
+
   const fetchTableData = async () => {
     const endpoint = dataBinding?.endpoint
       ? dataBinding.endpoint
@@ -230,6 +236,7 @@ export const TableComponent: React.FC<Props> = ({
     rowsPerPage: options?.rowsPerPage ?? 5,
     showPaymentButton: (options as any)?.showPaymentButton ?? false,
     showExportButton: (options as any)?.showExportButton ?? false,
+    showNotesButton: (options as any)?.showNotesButton ?? false,
     columns: options?.columns ?? [],
     formColumns:
       (options as any)?.formColumns ?? (options as any)?.form_columns ?? [],
@@ -1623,6 +1630,20 @@ export const TableComponent: React.FC<Props> = ({
           document.body,
         )}
 
+      {/* Client Notes & Progress Modal */}
+      {createPortal(
+        <AnimatePresence>
+          {notesKlijent && (
+            <ClientNotesModal
+              key={notesKlijent.id}
+              klijent={notesKlijent}
+              onClose={() => setNotesKlijent(null)}
+            />
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
+
       {/* Main Add/Edit Modal */}
       {showModal &&
         createPortal(
@@ -2058,9 +2079,9 @@ export const TableComponent: React.FC<Props> = ({
                         style={{
                           textAlign: "center",
                           padding: "10px 2px",
-                          width: "70px",
-                          minWidth: "70px",
-                          maxWidth: "70px",
+                          width: resolvedOptions.showNotesButton ? "100px" : "70px",
+                          minWidth: resolvedOptions.showNotesButton ? "100px" : "70px",
+                          maxWidth: resolvedOptions.showNotesButton ? "100px" : "70px",
                           overflow: "hidden",
                         }}
                       >
@@ -2074,6 +2095,33 @@ export const TableComponent: React.FC<Props> = ({
                             width: "100%",
                           }}
                         >
+                          {resolvedOptions.showNotesButton && (
+                            <button
+                              className="table-action-btn table-action-notes"
+                              type="button"
+                              title="Napomene i napredak"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setNotesKlijent(row);
+                              }}
+                            >
+                              <svg
+                                width="16"
+                                height="16"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                                <line x1="9" y1="13" x2="15" y2="13" />
+                                <line x1="9" y1="17" x2="13" y2="17" />
+                              </svg>
+                            </button>
+                          )}
                           <button
                             className="table-action-btn table-action-edit"
                             type="button"
