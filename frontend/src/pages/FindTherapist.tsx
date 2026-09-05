@@ -8,6 +8,7 @@ import {
   suggestTagsFromText,
 } from "../lib/specialtyTags";
 import { useClientAuth } from "../contexts/ClientAuthContext";
+import HomeLink from "../components/HomeLink";
 
 const backendBase =
   (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
@@ -130,8 +131,13 @@ const backLink: React.CSSProperties = {
 };
 
 const FindTherapist: React.FC = () => {
-  const { profile: clientProfile } = useClientAuth();
+  const { profile: clientProfile, signOut } = useClientAuth();
   const navigate = useNavigate();
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate("/");
+  };
 
   const [step, setStep] = useState<Step>("search");
   const [freeText, setFreeText] = useState("");
@@ -313,20 +319,48 @@ const FindTherapist: React.FC = () => {
         }}
       />
 
-      <a
-        href={clientProfile ? "/client/dashboard" : "/client"}
+      <HomeLink />
+
+      <div
         style={{
           position: "absolute",
           top: 20,
           right: 24,
-          fontSize: 13,
-          fontWeight: 600,
-          color: "#a5b4fc",
           zIndex: 1,
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
         }}
       >
-        {clientProfile ? "Vaši termini →" : "Prijavite se →"}
-      </a>
+        <a
+          href={clientProfile ? "/client/dashboard" : "/client"}
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "#a5b4fc",
+            textDecoration: "none",
+          }}
+        >
+          {clientProfile ? "Vaši termini →" : "Prijavite se →"}
+        </a>
+        {clientProfile && (
+          <button
+            onClick={handleSignOut}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#64748b",
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            Odjavi se
+          </button>
+        )}
+      </div>
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}

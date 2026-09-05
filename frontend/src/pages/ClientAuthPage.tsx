@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useClientAuth } from "../contexts/ClientAuthContext";
+import HomeLink from "../components/HomeLink";
 
 type View = "login" | "register";
 
@@ -65,6 +66,7 @@ const ClientAuthPage: React.FC = () => {
 
   return (
     <div className="auth-container">
+      <HomeLink />
       <div className="auth-card">
         <div className="auth-header">
           <div className="auth-logo">

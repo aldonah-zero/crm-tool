@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { motion, AnimatePresence, type Variants } from "framer-motion";
 import { useClientAuth } from "../contexts/ClientAuthContext";
+import HomeLink from "../components/HomeLink";
 
 const backendBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -136,6 +137,7 @@ const ClientDashboard: React.FC = () => {
   return (
     <div style={pageStyle}>
       <div className="glow-orb drift-a" style={{ width: 380, height: 380, background: "radial-gradient(circle, #16a34a, transparent 70%)", top: "-10%", left: "-8%", opacity: 0.28 }} />
+      <HomeLink />
       <div style={{ width: "100%", maxWidth: 720, position: "relative", zIndex: 1 }}>
         <div
           style={{

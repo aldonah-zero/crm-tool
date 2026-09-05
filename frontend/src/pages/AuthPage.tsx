@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import HomeLink from "../components/HomeLink";
 
 type AuthView = "login" | "register" | "setup-practice";
 
@@ -96,6 +97,7 @@ const AuthPage: React.FC = () => {
     if (view === "setup-practice") {
       return (
         <div className="auth-container">
+          <HomeLink />
           <div className="auth-card">
             <div className="auth-header">
               <div className="auth-logo">
@@ -164,6 +166,7 @@ const AuthPage: React.FC = () => {
 
   return (
     <div className="auth-container">
+      <HomeLink />
       <div className="auth-card">
         {/* Logo & header */}
         <div className="auth-header">
