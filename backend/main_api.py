@@ -607,9 +607,18 @@ def root():
 
 
 @app.get("/health", tags=["System"])
-def health_check():
+def health_check(database: Session = Depends(get_db)):
+    """Also used as a keep-alive ping (see .github/workflows/keep-alive.yml) -
+    runs a real query so it keeps the database connection warm too, not just
+    the web process."""
     from datetime import datetime
-    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "database": "connected"}
+    try:
+        database.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception as e:
+        logger.error(f"Health check DB query failed: {e}")
+        db_status = "error"
+    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "database": db_status}
 
 
 @app.get("/statistics", tags=["System"])
