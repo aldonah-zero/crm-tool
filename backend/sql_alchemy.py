@@ -33,6 +33,7 @@ class Tenant(Base):
     specialties: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated tag slugs
     working_hours: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON, keyed by weekday "0"-"6"
     default_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    photo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # data: URL, shown to clients
 
     # Billing - free trial, then a manually-confirmed monthly subscription
     # (no card processor yet; see /internal/mark-subscription-paid).
@@ -78,6 +79,7 @@ class ClientAccount(Base):
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    photo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # data: URL
     created_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, default=dt_datetime.utcnow)
 
 

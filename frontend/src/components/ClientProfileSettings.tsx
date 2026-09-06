@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 import { SPECIALTY_TAGS } from "../lib/specialtyTags";
+import AvatarUpload from "./AvatarUpload";
 
 const backendBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -32,6 +33,7 @@ const defaultWorkingHours = (): WorkingHours =>
 
 const ClientProfileSettings: React.FC = () => {
   const [practiceName, setPracticeName] = useState("");
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [specialties, setSpecialties] = useState<string[]>([]);
   const [workingHours, setWorkingHours] = useState<WorkingHours>(
     defaultWorkingHours(),
@@ -49,6 +51,7 @@ const ClientProfileSettings: React.FC = () => {
       try {
         const res = await axios.get(`${backendBase}/tenant/settings`);
         setPracticeName(res.data.name || "");
+        setPhotoUrl(res.data.photo_url || null);
         setSpecialties(res.data.specialties || []);
         if (
           res.data.working_hours &&
@@ -87,6 +90,7 @@ const ClientProfileSettings: React.FC = () => {
         specialties,
         working_hours: workingHours,
         default_price: defaultPrice ? Number(defaultPrice) : null,
+        photo_url: photoUrl || "",
       });
       setMessage({ text: "Sačuvano!", type: "success" });
     } catch (err) {
@@ -116,21 +120,41 @@ const ClientProfileSettings: React.FC = () => {
 
   return (
     <div style={cardStyle}>
-      <h3
+      <div
         style={{
-          margin: "0 0 6px",
-          fontFamily: "var(--font-display), Georgia, serif",
-          fontSize: 18,
-          fontWeight: 600,
-          color: "#0f172a",
+          display: "flex",
+          alignItems: "center",
+          gap: 18,
+          marginBottom: 24,
+          paddingBottom: 20,
+          borderBottom: "1px solid #f1f5f9",
         }}
       >
-        Vaš profil za klijente
-      </h3>
-      <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748b" }}>
-        Ovo određuje da li i kada se vaša praksa pojavljuje u pretrazi
-        "Pronađi terapeuta" za nove klijente.
-      </p>
+        <AvatarUpload
+          src={photoUrl}
+          name={practiceName}
+          size={84}
+          onChange={setPhotoUrl}
+        />
+        <div>
+          <h3
+            style={{
+              margin: "0 0 4px",
+              fontFamily: "var(--font-display), Georgia, serif",
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#0f172a",
+            }}
+          >
+            Vaš profil za klijente
+          </h3>
+          <p style={{ margin: 0, fontSize: 13, color: "#64748b", maxWidth: 420 }}>
+            Ovo određuje da li i kada se vaša praksa pojavljuje u pretrazi
+            "Pronađi terapeuta" za nove klijente. Slika se prikazuje uz vaše
+            ime u rezultatima pretrage.
+          </p>
+        </div>
+      </div>
 
       <label
         style={{

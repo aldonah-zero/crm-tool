@@ -71,6 +71,8 @@ def run_light_migrations(engine):
         "ALTER TABLE sesija ADD COLUMN reminder_sent BOOLEAN DEFAULT FALSE",
         "ALTER TABLE tenant ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE tenant ADD COLUMN subscription_paid_until TIMESTAMP",
+        "ALTER TABLE tenant ADD COLUMN photo_url TEXT",
+        "ALTER TABLE client_account ADD COLUMN photo_url TEXT",
     ]
     with engine.connect() as conn:
         for stmt in statements:
@@ -2722,11 +2724,20 @@ def compute_available_slots(tenant_id: int, database: Session, days: int = 14):
     return slots
 
 
+MAX_PHOTO_DATA_URL_LENGTH = 2_000_000  # ~1.4MB decoded - plenty for a resized avatar
+
+
+def _validate_photo_url(photo_url: str | None) -> None:
+    if photo_url and len(photo_url) > MAX_PHOTO_DATA_URL_LENGTH:
+        raise HTTPException(status_code=400, detail="Slika je prevelika.")
+
+
 class TenantSettingsUpdate(BaseModel):
     name: str | None = None
     specialties: list[str] | None = None
     working_hours: dict | None = None
     default_price: float | None = None
+    photo_url: str | None = None
 
 
 def _tenant_settings_payload(tenant: Tenant) -> dict:
@@ -2736,6 +2747,7 @@ def _tenant_settings_payload(tenant: Tenant) -> dict:
         "specialties": tenant.specialties.split(",") if tenant.specialties else [],
         "working_hours": json.loads(tenant.working_hours) if tenant.working_hours else {},
         "default_price": tenant.default_price,
+        "photo_url": tenant.photo_url,
     }
 
 
@@ -2768,6 +2780,9 @@ def update_tenant_settings(
         tenant.working_hours = json.dumps(data.working_hours)
     if data.default_price is not None:
         tenant.default_price = data.default_price
+    if data.photo_url is not None:
+        _validate_photo_url(data.photo_url)
+        tenant.photo_url = data.photo_url or None
 
     database.commit()
     database.refresh(tenant)
@@ -2814,6 +2829,7 @@ def public_search_therapists(
             "tenant_id": tenant.id,
             "name": tenant.name,
             "therapist_name": get_owner_name(tenant.id, database) or tenant.name,
+            "photo_url": tenant.photo_url,
             "specialties": sorted(tenant_tags),
             "matched_tags": sorted(matched),
             "match_count": len(matched),
@@ -2839,6 +2855,7 @@ def public_therapist_availability(
         "tenant_id": tenant.id,
         "name": tenant.name,
         "therapist_name": get_owner_name(tenant_id, database) or tenant.name,
+        "photo_url": tenant.photo_url,
         "slots": [
             {"start": s["start"].isoformat(), "end": s["end"].isoformat()}
             for s in slots
@@ -3396,12 +3413,14 @@ def get_or_create_client_profile(
         "email": account.email,
         "full_name": account.full_name,
         "phone": account.phone,
+        "photo_url": account.photo_url,
     }
 
 
 class ClientProfileUpdate(PydanticBaseModel):
     full_name: str | None = None
     phone: str | None = None
+    photo_url: str | None = None
 
 
 @app.put("/client-auth/profile", tags=["ClientAuth"])
@@ -3418,6 +3437,9 @@ def update_client_profile(
         account.full_name = data.full_name.strip() or account.full_name
     if data.phone is not None:
         account.phone = data.phone.strip() or None
+    if data.photo_url is not None:
+        _validate_photo_url(data.photo_url)
+        account.photo_url = data.photo_url or None
 
     database.commit()
     database.refresh(account)
@@ -3427,6 +3449,7 @@ def update_client_profile(
         "email": account.email,
         "full_name": account.full_name,
         "phone": account.phone,
+        "photo_url": account.photo_url,
     }
 
 
@@ -3450,10 +3473,11 @@ def list_client_appointments(
     if not klijent_ids_by_tenant:
         return []
 
-    tenants = {
-        t.id: t.name for t in
-        database.query(Tenant).filter(Tenant.id.in_(set(klijent_ids_by_tenant.values()))).all()
-    }
+    tenant_rows = database.query(Tenant).filter(
+        Tenant.id.in_(set(klijent_ids_by_tenant.values()))
+    ).all()
+    tenants = {t.id: t.name for t in tenant_rows}
+    tenant_photos = {t.id: t.photo_url for t in tenant_rows}
 
     links = database.query(SesijaKlijent).filter(
         SesijaKlijent.klijent_id.in_(klijent_ids_by_tenant.keys())
@@ -3471,6 +3495,7 @@ def list_client_appointments(
             "tenant_id": s.tenant_id,
             "tenant_name": tenants.get(s.tenant_id, ""),
             "therapist_name": therapist_names.get(s.tenant_id) or tenants.get(s.tenant_id, ""),
+            "photo_url": tenant_photos.get(s.tenant_id),
             "pocetak": s.pocetak.isoformat(),
             "kraj": s.kraj.isoformat(),
             "cena": s.cena,

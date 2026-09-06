@@ -9,6 +9,7 @@ import {
 } from "../lib/specialtyTags";
 import { useClientAuth } from "../contexts/ClientAuthContext";
 import HomeLink from "../components/HomeLink";
+import Avatar from "../components/Avatar";
 
 const backendBase =
   (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
@@ -17,6 +18,7 @@ interface TherapistResult {
   tenant_id: number;
   name: string;
   therapist_name?: string;
+  photo_url?: string | null;
   specialties: string[];
   matched_tags: string[];
   match_count: number;
@@ -646,7 +648,9 @@ const FindTherapist: React.FC = () => {
                           flexWrap: "wrap",
                         }}
                       >
-                        <div>
+                        <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                          <Avatar src={r.photo_url} name={displayName(r)} size={52} />
+                          <div>
                           <h3
                             style={{
                               margin: "0 0 2px",
@@ -698,6 +702,7 @@ const FindTherapist: React.FC = () => {
                               </span>
                             ))}
                           </div>
+                          </div>
                         </div>
                         <motion.button
                           whileHover={{ y: -2 }}
@@ -731,20 +736,25 @@ const FindTherapist: React.FC = () => {
                 ← Nazad na rezultate
               </button>
               <div style={card}>
-                <h3
-                  style={{
-                    margin: "0 0 2px",
-                    fontFamily: "var(--font-display), Georgia, serif",
-                    fontSize: 20,
-                    fontWeight: 600,
-                    color: "#0f172a",
-                  }}
-                >
-                  {displayName(selectedTherapist)}
-                </h3>
-                <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748b" }}>
-                  Izaberite slobodan termin
-                </p>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20 }}>
+                  <Avatar src={selectedTherapist.photo_url} name={displayName(selectedTherapist)} size={48} />
+                  <div>
+                    <h3
+                      style={{
+                        margin: 0,
+                        fontFamily: "var(--font-display), Georgia, serif",
+                        fontSize: 20,
+                        fontWeight: 600,
+                        color: "#0f172a",
+                      }}
+                    >
+                      {displayName(selectedTherapist)}
+                    </h3>
+                    <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+                      Izaberite slobodan termin
+                    </p>
+                  </div>
+                </div>
 
                 {loading ? (
                   <p style={{ color: "#64748b" }}>Učitavanje termina...</p>
@@ -820,12 +830,16 @@ const FindTherapist: React.FC = () => {
               <div style={card}>
                 <div
                   style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
                     background: "#eef2ff",
                     borderRadius: 12,
                     padding: "12px 16px",
                     marginBottom: 20,
                   }}
                 >
+                  <Avatar src={selectedTherapist.photo_url} name={displayName(selectedTherapist)} size={40} />
                   <p style={{ margin: 0, fontSize: 13, color: "#4338ca" }}>
                     <strong>{displayName(selectedTherapist)}</strong>
                     <br />

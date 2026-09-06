@@ -4,6 +4,8 @@ import axios from "axios";
 import { motion, AnimatePresence, type Variants } from "framer-motion";
 import { useClientAuth } from "../contexts/ClientAuthContext";
 import HomeLink from "../components/HomeLink";
+import Avatar from "../components/Avatar";
+import AvatarUpload from "../components/AvatarUpload";
 
 const backendBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -12,6 +14,7 @@ interface Appointment {
   tenant_id: number;
   tenant_name: string;
   therapist_name: string;
+  photo_url?: string | null;
   pocetak: string;
   kraj: string;
   cena: number;
@@ -49,7 +52,7 @@ const cardVariants: Variants = {
 type Tab = "termini" | "profil";
 
 const ClientDashboard: React.FC = () => {
-  const { profile, loading: authLoading, signOut } = useClientAuth();
+  const { profile, loading: authLoading, signOut, updateProfileLocal } = useClientAuth();
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("termini");
   const [appointments, setAppointments] = useState<Appointment[]>([]);
@@ -57,7 +60,11 @@ const ClientDashboard: React.FC = () => {
   const [cancellingId, setCancellingId] = useState<number | null>(null);
   const [error, setError] = useState("");
 
-  const [profileForm, setProfileForm] = useState({ full_name: "", phone: "" });
+  const [profileForm, setProfileForm] = useState<{
+    full_name: string;
+    phone: string;
+    photo_url: string | null;
+  }>({ full_name: "", phone: "", photo_url: null });
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
 
@@ -69,6 +76,7 @@ const ClientDashboard: React.FC = () => {
       setProfileForm({
         full_name: profile.full_name || "",
         phone: profile.phone || "",
+        photo_url: profile.photo_url || null,
       });
     }
   }, [authLoading, profile, navigate]);
@@ -108,7 +116,11 @@ const ClientDashboard: React.FC = () => {
     setSavingProfile(true);
     setProfileMessage("");
     try {
-      await axios.put(`${backendBase}/client-auth/profile`, profileForm);
+      await axios.put(`${backendBase}/client-auth/profile`, {
+        ...profileForm,
+        photo_url: profileForm.photo_url || "",
+      });
+      updateProfileLocal(profileForm);
       setProfileMessage("Sačuvano!");
     } catch (err) {
       console.error("Error saving profile:", err);
@@ -149,13 +161,21 @@ const ClientDashboard: React.FC = () => {
             gap: 12,
           }}
         >
-          <div>
-            <h1 style={{ fontFamily: "var(--font-display)", color: "#fff", fontSize: 26, fontWeight: 600, margin: 0 }}>
-              Zdravo, {profile?.full_name?.split(" ")[0] || "tamo"}
-            </h1>
-            <p style={{ color: "#94a3b8", fontSize: 13, margin: "4px 0 0" }}>
-              {profile?.email}
-            </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <Avatar
+              src={profile?.photo_url}
+              name={profile?.full_name || profile?.email}
+              size={52}
+              gradient={["#16a34a", "#0f766e"]}
+            />
+            <div>
+              <h1 style={{ fontFamily: "var(--font-display)", color: "#fff", fontSize: 26, fontWeight: 600, margin: 0 }}>
+                Zdravo, {profile?.full_name?.split(" ")[0] || "tamo"}
+              </h1>
+              <p style={{ color: "#94a3b8", fontSize: 13, margin: "4px 0 0" }}>
+                {profile?.email}
+              </p>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <motion.button
@@ -215,13 +235,16 @@ const ClientDashboard: React.FC = () => {
                     {upcoming.map((a) => (
                       <motion.div key={a.sesija_id} variants={cardVariants} exit="exit" layout style={card}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-                          <div>
-                            <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, color: "#0f172a", fontSize: 16, marginBottom: 4 }}>
-                              {a.therapist_name}
-                            </div>
-                            <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6 }}>{a.tenant_name}</div>
-                            <div style={{ color: "#334155", fontSize: 14, fontFamily: "var(--font-mono)" }}>
-                              {formatDateTime(a.pocetak)}
+                          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                            <Avatar src={a.photo_url} name={a.therapist_name} size={40} />
+                            <div>
+                              <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, color: "#0f172a", fontSize: 16, marginBottom: 4 }}>
+                                {a.therapist_name}
+                              </div>
+                              <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6 }}>{a.tenant_name}</div>
+                              <div style={{ color: "#334155", fontSize: 14, fontFamily: "var(--font-mono)" }}>
+                                {formatDateTime(a.pocetak)}
+                              </div>
                             </div>
                           </div>
                           <span style={{ fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 20, background: statusLabel[a.status]?.bg || "#f1f5f9", color: statusLabel[a.status]?.color || "#64748b" }}>
@@ -249,13 +272,16 @@ const ClientDashboard: React.FC = () => {
                     {past.map((a) => (
                       <div key={a.sesija_id} style={{ ...card, opacity: 0.7 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-                          <div>
-                            <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, color: "#0f172a", fontSize: 16, marginBottom: 4 }}>
-                              {a.therapist_name}
-                            </div>
-                            <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6 }}>{a.tenant_name}</div>
-                            <div style={{ color: "#334155", fontSize: 14, fontFamily: "var(--font-mono)" }}>
-                              {formatDateTime(a.pocetak)}
+                          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                            <Avatar src={a.photo_url} name={a.therapist_name} size={40} />
+                            <div>
+                              <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, color: "#0f172a", fontSize: 16, marginBottom: 4 }}>
+                                {a.therapist_name}
+                              </div>
+                              <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6 }}>{a.tenant_name}</div>
+                              <div style={{ color: "#334155", fontSize: 14, fontFamily: "var(--font-mono)" }}>
+                                {formatDateTime(a.pocetak)}
+                              </div>
                             </div>
                           </div>
                           <span style={{ fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 20, background: statusLabel[a.status]?.bg || "#f1f5f9", color: statusLabel[a.status]?.color || "#64748b" }}>
@@ -270,9 +296,32 @@ const ClientDashboard: React.FC = () => {
             </motion.div>
           ) : (
             <motion.div key="profil" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} style={card}>
-              <h3 style={{ margin: "0 0 20px", fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 600, color: "#0f172a" }}>
-                Moj profil
-              </h3>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 18,
+                  marginBottom: 22,
+                  paddingBottom: 20,
+                  borderBottom: "1px solid #f1f5f9",
+                }}
+              >
+                <AvatarUpload
+                  src={profileForm.photo_url}
+                  name={profileForm.full_name || profile?.email}
+                  size={80}
+                  gradient={["#16a34a", "#0f766e"]}
+                  onChange={(photo_url) => setProfileForm({ ...profileForm, photo_url })}
+                />
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 600, color: "#0f172a" }}>
+                    Moj profil
+                  </h3>
+                  <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+                    Dodajte sliku profila i vaše kontakt podatke.
+                  </p>
+                </div>
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
                   <label style={fieldLabel}>Ime i prezime</label>

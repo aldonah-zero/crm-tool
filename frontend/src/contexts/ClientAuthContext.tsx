@@ -14,6 +14,7 @@ interface ClientProfile {
   email: string;
   full_name: string | null;
   phone: string | null;
+  photo_url: string | null;
 }
 
 interface ClientAuthContextType {
@@ -32,6 +33,7 @@ interface ClientAuthContextType {
   ) => Promise<{ error?: string }>;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
+  updateProfileLocal: (patch: Partial<ClientProfile>) => void;
 }
 
 const ClientAuthContext = createContext<ClientAuthContextType | undefined>(
@@ -177,6 +179,10 @@ export const ClientAuthProvider: React.FC<{ children: React.ReactNode }> = ({
     });
   };
 
+  const updateProfileLocal = (patch: Partial<ClientProfile>) => {
+    setProfile((prev) => (prev ? { ...prev, ...patch } : prev));
+  };
+
   const signOut = async () => {
     await clientSupabase.auth.signOut();
     setUser(null);
@@ -196,6 +202,7 @@ export const ClientAuthProvider: React.FC<{ children: React.ReactNode }> = ({
         signIn,
         signInWithGoogle,
         signOut,
+        updateProfileLocal,
       }}
     >
       {children}
