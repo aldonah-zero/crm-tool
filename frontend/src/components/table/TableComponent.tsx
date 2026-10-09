@@ -2166,6 +2166,15 @@ export const TableComponent: React.FC<Props> = ({
                                 ? `${backendBase}${url}/${rowId}/`
                                 : `${url}/${rowId}/`;
 
+                              const entity = dataBinding?.entity;
+                              const confirmText =
+                                entity === "Klijent"
+                                  ? "Da li ste sigurni da želite da obrišete ovog klijenta?\n\nBiće obrisane i sve njegove individualne sesije, uplate i beleške. Ova radnja se ne može poništiti."
+                                  : entity === "Grupa"
+                                    ? "Da li ste sigurni da želite da obrišete ovu grupu?\n\nBiće obrisane i sve sesije ove grupe. Ova radnja se ne može poništiti."
+                                    : "Da li ste sigurni da želite da obrišete ovaj zapis? Ova radnja se ne može poništiti.";
+                              if (!window.confirm(confirmText)) return;
+
                               setTableData((prev) =>
                                 prev.filter((r) => getRowId(r) !== rowId),
                               );
@@ -2175,6 +2184,7 @@ export const TableComponent: React.FC<Props> = ({
                                 await fetchTableData();
                               } catch (err) {
                                 console.error("Error deleting data:", err);
+                                window.alert("Brisanje nije uspelo. Pokušajte ponovo ili osvežite stranicu.");
                                 await fetchTableData();
                               }
                             }}

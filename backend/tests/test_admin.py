@@ -42,6 +42,21 @@ from sql_alchemy import Tenant, UserProfile, Klijent, Sesija, SesijaKlijent
 client = TestClient(app)
 SECRET = os.environ["SUPABASE_JWT_SECRET"]
 
+# Production runs on Postgres, which enforces foreign keys; SQLite doesn't
+# unless asked. Turn it on so delete bugs that only show up in production
+# (e.g. deleting a client who has sessions) fail here too.
+from sqlalchemy import event as _sa_event
+
+_engine = SessionLocal.kw["bind"]
+
+
+@_sa_event.listens_for(_engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, _record):
+    dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+
+_engine.dispose()
+
 
 def make_token(sub: str) -> str:
     payload = {
@@ -646,14 +661,12 @@ def test_regular_client_and_session_creation_attributes_to_logged_in_member(seed
     client.delete(f"/klijent/{new_client_id}/", headers=headers)
 
 
-def test_regular_creation_without_token_leaves_therapist_unassigned(seeded):
-    """No Authorization header at all (e.g. an older cached frontend
-    build) must keep working exactly as before - just without attribution."""
+def test_regular_creation_without_token_is_rejected(seeded):
+    """Practice data endpoints require a logged-in therapist - the
+    X-Tenant-ID header alone is never trusted."""
     headers = {"X-Tenant-ID": str(seeded["tenant_id"])}
     resp = client.post("/klijent/", json={"ime": "Anon", "prezime": "Client"}, headers=headers)
-    assert resp.status_code == 200
-    assert resp.json()["therapist_id"] is None
-    client.delete(f"/klijent/{resp.json()['id']}/", headers=headers)
+    assert resp.status_code == 401
 
 
 # --------------------------------------------------------------------------
@@ -1051,3 +1064,96 @@ def test_bulk_invite_shows_supabase_error_reason(seeded, monkeypatch):
     assert "Invalid API key" in result["detail"]
     # New-style secret keys must not be sent as a Bearer token.
     assert captured["headers"] == {"apikey": "sb_secret_abc"}
+
+
+# --------------------------------------------------------------------------
+# Practice data isolation + deletes
+# --------------------------------------------------------------------------
+
+def _practice_headers(sub: str, tenant_id: int) -> dict:
+    return {**auth_headers(sub), "X-Tenant-ID": str(tenant_id)}
+
+
+def test_practice_data_requires_login(seeded):
+    resp = client.get("/klijent/", headers={"X-Tenant-ID": str(seeded["tenant_id"])})
+    assert resp.status_code == 401
+
+
+def test_practice_data_cannot_be_read_by_spoofing_tenant_header(seeded):
+    # The member belongs to "Test Center" but asks for the other practice's data.
+    resp = client.get("/klijent/", headers=_practice_headers("member-sub", seeded["other_tenant_id"]))
+    assert resp.status_code == 200
+    ids = {c["id"] for c in resp.json()}
+    assert seeded["other_client_id"] not in ids
+    assert seeded["c1_id"] in ids
+
+
+def test_deleting_client_removes_their_individual_sessions_notes_and_memberships(seeded, monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    headers = _practice_headers("member-sub", seeded["tenant_id"])
+    klijent_id = client.post("/klijent/", json={"ime": "Brisanje", "prezime": "Test"}, headers=headers).json()["id"]
+    start = datetime(2026, 3, 2, 10, 0)
+    sesija = client.post("/sesija/", json={
+        "pocetak": start.isoformat(), "kraj": (start + timedelta(hours=1)).isoformat(),
+        "cena": 3000, "status": "zakazano", "klijent_id": klijent_id,
+    }, headers=headers)
+    assert sesija.status_code == 200, sesija.text
+    sesija_id = sesija.json()["id"]
+    assert client.post(f"/klijent/{klijent_id}/napomene", json={"tekst": "Beleška"}, headers=headers).status_code == 200
+    grupa_id = client.post("/grupa/", json={"naziv": "G", "opis": "", "cena": 1000}, headers=headers).json()["id"]
+    assert client.post("/grupaklijent/", json={"grupa_id": grupa_id, "klijent_id": klijent_id}, headers=headers).status_code == 200
+
+    resp = client.delete(f"/klijent/{klijent_id}/", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    assert all(c["id"] != klijent_id for c in client.get("/klijent/", headers=headers).json())
+    assert client.get(f"/sesija/{sesija_id}/", headers=headers).status_code == 404
+    client.delete(f"/grupa/{grupa_id}/", headers=headers)
+
+
+def test_deleting_session_and_group_with_links_works(seeded, monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    headers = _practice_headers("member-sub", seeded["tenant_id"])
+    klijent_id = client.post("/klijent/", json={"ime": "Sesija", "prezime": "Brisanje"}, headers=headers).json()["id"]
+    start = datetime(2026, 3, 3, 10, 0)
+    sesija_id = client.post("/sesija/", json={
+        "pocetak": start.isoformat(), "kraj": (start + timedelta(hours=1)).isoformat(),
+        "cena": 3000, "status": "zakazano", "klijent_id": klijent_id,
+    }, headers=headers).json()["id"]
+    assert client.post(f"/sesija/{sesija_id}/mark-paid/", json={"nacin_placanja": "gotovina"}, headers=headers).status_code in (200, 201)
+
+    resp = client.delete(f"/sesija/{sesija_id}/", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    grupa_id = client.post("/grupa/", json={"naziv": "G2", "opis": "", "cena": 1000}, headers=headers).json()["id"]
+    gs = client.post("/sesija/", json={
+        "pocetak": start.isoformat(), "kraj": (start + timedelta(hours=1)).isoformat(),
+        "cena": 1000, "status": "zakazano", "grupa_id": grupa_id,
+    }, headers=headers)
+    assert gs.status_code == 200, gs.text
+    resp = client.delete(f"/grupa/{grupa_id}/", headers=headers)
+    assert resp.status_code == 200, resp.text
+    client.delete(f"/klijent/{klijent_id}/", headers=headers)
+
+
+def _client_token_headers(sub: str, email: str) -> dict:
+    payload = {
+        "sub": sub, "email": email, "aud": "authenticated", "role": "authenticated",
+        "exp": datetime.utcnow() + timedelta(hours=1),
+    }
+    return {"Authorization": f"Bearer {jwt.encode(payload, SECRET, algorithm='HS256')}"}
+
+
+def test_client_portal_uses_verified_login_not_headers_or_body(seeded):
+    headers = _client_token_headers("client-sub-1", "real.client@example.com")
+
+    # The body claims a different email - the verified token wins.
+    profile = client.post("/client-auth/profile", json={
+        "supabase_user_id": "someone-else", "email": "victim@example.com",
+    }, headers=headers)
+    assert profile.status_code == 200
+    assert profile.json()["email"] == "real.client@example.com"
+
+    # Without a login, a spoofed X-Client-ID gets nothing.
+    assert client.get("/client/appointments", headers={"X-Client-ID": str(profile.json()["client_id"])}).status_code == 401
+    assert client.get("/client/appointments", headers=headers).status_code == 200

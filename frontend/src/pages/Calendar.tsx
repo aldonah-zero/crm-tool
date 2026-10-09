@@ -247,6 +247,7 @@ const Calendar: React.FC = () => {
     e?: React.MouseEvent,
   ) => {
     if (e) e.stopPropagation();
+    if (!window.confirm("Da li ste sigurni da želite da obrišete ovu sesiju?")) return;
     setDeletingId(sessionId);
     await new Promise((r) => setTimeout(r, 350));
 
@@ -259,7 +260,9 @@ const Calendar: React.FC = () => {
       showToast("Sesija obrisana");
     } catch (err: any) {
       const status = err?.response?.status;
-      if (status === 404 || status === 409) {
+      // 404 = already gone. Anything else (e.g. 409) means it was NOT
+      // deleted, so reload instead of pretending it worked.
+      if (status === 404) {
         showToast("Sesija obrisana");
       } else {
         showToast("Greška pri brisanju!", "error");

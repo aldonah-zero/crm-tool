@@ -107,6 +107,12 @@ export const ClientAuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
       setSession(s);
       setUser(s?.user ?? null);
+      // The backend identifies the client from this verified token.
+      if (s?.access_token) {
+        axios.defaults.headers.common["Authorization"] = `Bearer ${s.access_token}`;
+      } else {
+        delete axios.defaults.headers.common["Authorization"];
+      }
 
       if (s?.user) {
         const p = await fetchProfile(s.user);

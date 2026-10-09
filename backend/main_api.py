@@ -53,18 +53,27 @@ origins = [
 ]
 def get_tenant_id(request: Request) -> int:
     """
-    Resolve tenant from the X-Tenant-ID header.
-    Every endpoint uses this via Depends().
+    Resolve the caller's practice (tenant) from their verified login token.
+    Every practice-data endpoint uses this via Depends().
+
+    The X-Tenant-ID header the frontend sends is deliberately NOT trusted:
+    it is just a number anyone could change, so trusting it would let one
+    practice (or an anonymous caller) read another practice's clients.
     """
-    tenant_id = request.headers.get("X-Tenant-ID")
+    supabase_user_id = get_verified_supabase_user_id(request)
 
-    if not tenant_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Tenant ID missing"
-        )
-
-    return int(tenant_id)
+    database = SessionLocal()
+    try:
+        profile = database.query(UserProfile).filter(
+            UserProfile.supabase_user_id == supabase_user_id
+        ).first()
+        if not profile:
+            raise HTTPException(status_code=401, detail="No profile for this account")
+        if not profile.is_approved:
+            raise HTTPException(status_code=403, detail="Account pending approval")
+        return profile.tenant_id
+    finally:
+        database.close()
 
 
 def run_light_migrations(engine):
@@ -733,7 +742,7 @@ _jwks_client = jwt.PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json") 
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 
-def get_verified_supabase_user_id(request: Request) -> str:
+def get_verified_supabase_claims(request: Request) -> dict:
     """Verifies the bearer token's signature, expiry, audience and issuer,
     and returns the verified `sub` claim (the Supabase auth user id).
     Never trusts an unverified/self-reported id. Tries Supabase's JWKS
@@ -780,10 +789,13 @@ def get_verified_supabase_user_id(request: Request) -> str:
             logger.error("Neither SUPABASE_URL nor SUPABASE_JWT_SECRET is set - admin auth cannot verify tokens")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    sub = payload.get("sub")
-    if not sub:
+    if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Invalid token")
-    return sub
+    return payload
+
+
+def get_verified_supabase_user_id(request: Request) -> str:
+    return get_verified_supabase_claims(request)["sub"]
 
 
 def require_admin(
@@ -2403,7 +2415,7 @@ async def bulk_delete_sesija(
     for item_id in ids:
         db_sesija = database.query(Sesija).filter(Sesija.id == item_id, Sesija.tenant_id == tenant_id).first()
         if db_sesija:
-            database.delete(db_sesija)
+            _delete_sesija_with_links(database, db_sesija)
             deleted_count += 1
         else:
             not_found.append(item_id)
@@ -2580,6 +2592,44 @@ async def update_sesija(
     }
 
 
+def _delete_sesija_with_links(database: Session, sesija: "Sesija"):
+    """Postgres enforces foreign keys, so a session's client/group links
+    and payments have to go before the session itself."""
+    database.query(SesijaKlijent).filter(SesijaKlijent.sesija_id == sesija.id).delete(synchronize_session=False)
+    database.query(SesijaGrupa).filter(SesijaGrupa.sesija_1_id == sesija.id).delete(synchronize_session=False)
+    database.query(Cena).filter(Cena.sesija_2_id == sesija.id).delete(synchronize_session=False)
+    database.delete(sesija)
+
+
+def _session_has_other_participants(database: Session, sesija_id: int) -> bool:
+    return (
+        database.query(SesijaKlijent).filter(SesijaKlijent.sesija_id == sesija_id).count() > 0
+        or database.query(SesijaGrupa).filter(SesijaGrupa.sesija_1_id == sesija_id).count() > 0
+    )
+
+
+def _delete_klijent_with_links(database: Session, klijent: "Klijent"):
+    """Deleting a client also deletes their individual sessions (and those
+    sessions' payments) and their notes, and removes them from groups.
+    Group sessions and sessions shared with other clients are kept - the
+    client is only taken off them."""
+    links = database.query(SesijaKlijent).filter(SesijaKlijent.klijent_id == klijent.id).all()
+    session_ids = {l.sesija_id for l in links}
+    for l in links:
+        database.delete(l)
+    database.flush()
+
+    for sesija_id in session_ids:
+        sesija = database.query(Sesija).filter(Sesija.id == sesija_id).first()
+        if sesija and not _session_has_other_participants(database, sesija_id):
+            _delete_sesija_with_links(database, sesija)
+
+    database.query(Cena).filter(Cena.klijent_1_id == klijent.id).delete(synchronize_session=False)
+    database.query(KlijentNapomena).filter(KlijentNapomena.klijent_id == klijent.id).delete(synchronize_session=False)
+    database.query(GrupaKlijent).filter(GrupaKlijent.klijent_id == klijent.id).delete(synchronize_session=False)
+    database.delete(klijent)
+
+
 @app.delete("/sesija/{sesija_id}/", tags=["Sesija"])
 async def delete_sesija(
     sesija_id: int,
@@ -2589,7 +2639,13 @@ async def delete_sesija(
     db_sesija = database.query(Sesija).filter(Sesija.id == sesija_id, Sesija.tenant_id == tenant_id).first()
     if db_sesija is None:
         raise HTTPException(status_code=404, detail="Sesija not found")
-    database.delete(db_sesija)
+    affected_client_ids = [
+        l.klijent_id for l in database.query(SesijaKlijent).filter(SesijaKlijent.sesija_id == sesija_id).all()
+    ]
+    _delete_sesija_with_links(database, db_sesija)
+    database.flush()
+    for cid in affected_client_ids:
+        _recompute_client_free_sessions(database, cid)
     database.commit()
     return {"message": "Deleted", "id": sesija_id}
 
@@ -2717,6 +2773,17 @@ def delete_grupa(
     if not db_grupa:
         raise HTTPException(status_code=404, detail="Grupa not found")
 
+    # Sessions that belonged only to this group go with it; sessions that
+    # also have individual clients just lose the group link.
+    group_session_ids = [
+        l.sesija_1_id for l in database.query(SesijaGrupa).filter(SesijaGrupa.grupa_id == grupa_id).all()
+    ]
+    database.query(SesijaGrupa).filter(SesijaGrupa.grupa_id == grupa_id).delete(synchronize_session=False)
+    database.flush()
+    for sid in group_session_ids:
+        sesija = database.query(Sesija).filter(Sesija.id == sid, Sesija.tenant_id == tenant_id).first()
+        if sesija and not _session_has_other_participants(database, sid):
+            _delete_sesija_with_links(database, sesija)
     database.query(GrupaKlijent).filter(GrupaKlijent.grupa_id == grupa_id, GrupaKlijent.tenant_id == tenant_id).delete()
     database.delete(db_grupa)
     database.commit()
@@ -2854,7 +2921,7 @@ def bulk_delete_klijent(
     for item_id in ids:
         obj = database.query(Klijent).filter(Klijent.id == item_id, Klijent.tenant_id == tenant_id).first()
         if obj:
-            database.delete(obj)
+            _delete_klijent_with_links(database, obj)
             deleted += 1
     database.commit()
     return {"deleted_count": deleted}
@@ -2890,7 +2957,7 @@ def delete_klijent(
     db_klijent = database.query(Klijent).filter(Klijent.id == klijent_id, Klijent.tenant_id == tenant_id).first()
     if not db_klijent:
         raise HTTPException(status_code=404, detail="Klijent not found")
-    database.delete(db_klijent)
+    _delete_klijent_with_links(database, db_klijent)
     database.commit()
     return {"message": "Deleted", "id": klijent_id}
 
@@ -3941,14 +4008,20 @@ def list_team_members(
 ############################################
 
 def get_client_id(request: Request) -> int:
-    """Resolve the calling client account from the X-Client-ID header,
-    mirroring get_tenant_id's trust model for the therapist side."""
-    client_id = request.headers.get("X-Client-ID")
-
-    if not client_id:
-        raise HTTPException(status_code=400, detail="Client ID missing")
-
-    return int(client_id)
+    """Resolve the calling client account from their verified login token.
+    The X-Client-ID header is not trusted - it's just a number anyone
+    could change to see or cancel someone else's appointments."""
+    supabase_user_id = get_verified_supabase_user_id(request)
+    database = SessionLocal()
+    try:
+        account = database.query(ClientAccount).filter(
+            ClientAccount.supabase_user_id == supabase_user_id
+        ).first()
+        if not account:
+            raise HTTPException(status_code=401, detail="No client account for this login")
+        return account.id
+    finally:
+        database.close()
 
 
 class ClientProfileRequest(PydanticBaseModel):
@@ -3961,10 +4034,18 @@ class ClientProfileRequest(PydanticBaseModel):
 @app.post("/client-auth/profile", tags=["ClientAuth"])
 def get_or_create_client_profile(
         data: ClientProfileRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
     """Find-or-create a ClientAccount for the logged-in Supabase user -
-    mirrors /auth/login-profile's shape for the therapist side."""
+    mirrors /auth/login-profile's shape for the therapist side. The
+    account id and email come from the verified login token, never from
+    the request body (the email decides whose appointments are shown)."""
+    claims = get_verified_supabase_claims(request)
+    data.supabase_user_id = claims["sub"]
+    if not claims.get("email"):
+        raise HTTPException(status_code=401, detail="Login has no email")
+    data.email = claims["email"]
     account = database.query(ClientAccount).filter(
         ClientAccount.supabase_user_id == data.supabase_user_id
     ).first()
