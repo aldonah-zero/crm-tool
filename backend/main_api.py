@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, time as dt_time, date
 from collections import Counter
 from fastapi import Depends, FastAPI, HTTPException, Request, status, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text, or_, func
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker, selectinload, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError, ProgrammingError
 from pydantic_classes import *
 from sql_alchemy import *
@@ -107,6 +108,28 @@ def run_light_migrations(engine):
         "CREATE INDEX IF NOT EXISTS ix_klijent_therapist_id ON klijent (therapist_id)",
         "CREATE INDEX IF NOT EXISTS ix_sesija_therapist_id ON sesija (therapist_id)",
         "CREATE INDEX IF NOT EXISTS ix_sesija_pocetak ON sesija (pocetak)",
+        # Every practice-data query filters by tenant_id and joins on these
+        # foreign keys - without indexes Postgres scans whole tables
+        # (including every other practice's rows) on each request.
+        "CREATE INDEX IF NOT EXISTS ix_klijent_tenant_id ON klijent (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_klijent_email ON klijent (email)",
+        "CREATE INDEX IF NOT EXISTS ix_sesija_tenant_id ON sesija (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_grupa_tenant_id ON grupa (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cena_tenant_id ON cena (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cena_sesija_2_id ON cena (sesija_2_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cena_klijent_1_id ON cena (klijent_1_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijaklijent_tenant_id ON sesijaklijent (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijaklijent_sesija_id ON sesijaklijent (sesija_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijaklijent_klijent_id ON sesijaklijent (klijent_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijagrupa_tenant_id ON sesijagrupa (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijagrupa_sesija_1_id ON sesijagrupa (sesija_1_id)",
+        "CREATE INDEX IF NOT EXISTS ix_sesijagrupa_grupa_id ON sesijagrupa (grupa_id)",
+        "CREATE INDEX IF NOT EXISTS ix_grupaklijent_tenant_id ON grupaklijent (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_grupaklijent_grupa_id ON grupaklijent (grupa_id)",
+        "CREATE INDEX IF NOT EXISTS ix_grupaklijent_klijent_id ON grupaklijent (klijent_id)",
+        "CREATE INDEX IF NOT EXISTS ix_klijent_napomena_klijent_id ON klijent_napomena (klijent_id)",
+        "CREATE INDEX IF NOT EXISTS ix_user_profile_tenant_id ON user_profile (tenant_id)",
+        "CREATE INDEX IF NOT EXISTS ix_supervision_signup_user_profile_id ON supervision_signup (user_profile_id)",
     ]
     with engine.connect() as conn:
         for stmt in statements:
@@ -588,6 +611,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Compress JSON responses (e.g. the calendar's session list) - typically
+# ~10x smaller over the network. Tiny responses are left as-is.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 ############################################
 #
@@ -1793,6 +1820,19 @@ async def sync_grupa_members(
 #
 ############################################
 
+def _row_dict(obj) -> dict:
+    return {k: v for k, v in obj.__dict__.items() if k != "_sa_instance_state"}
+
+
+def _group_rows(rows, key: str) -> dict:
+    """{key value: [row dicts]} - loads related rows once instead of one
+    query per parent row."""
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(getattr(r, key), []).append(_row_dict(r))
+    return grouped
+
+
 @app.get("/sesija/", tags=["Sesija"])
 def get_all_sesija(
     tenant_id: int = Depends(require_active_subscription),
@@ -1804,21 +1844,16 @@ def get_all_sesija(
 
     if detailed:
         sesija_list = database.query(Sesija).filter(Sesija.tenant_id == tenant_id).all()
+        cena_by = _group_rows(database.query(Cena).filter(Cena.tenant_id == tenant_id).all(), "sesija_2_id")
+        sk_by = _group_rows(database.query(SesijaKlijent).filter(SesijaKlijent.tenant_id == tenant_id).all(), "sesija_id")
+        sg_by = _group_rows(database.query(SesijaGrupa).filter(SesijaGrupa.tenant_id == tenant_id).all(), "sesija_1_id")
+
         result = []
-
         for sesija_item in sesija_list:
-            item_dict = sesija_item.__dict__.copy()
-            item_dict.pop("_sa_instance_state", None)
-
-            cena_list = database.query(Cena).filter(Cena.sesija_2_id == sesija_item.id, Cena.tenant_id == tenant_id).all()
-            item_dict["cena"] = [{k: v for k, v in c.__dict__.items() if k != "_sa_instance_state"} for c in cena_list]
-
-            sesijaklijent_list = database.query(SesijaKlijent).filter(SesijaKlijent.sesija_id == sesija_item.id, SesijaKlijent.tenant_id == tenant_id).all()
-            item_dict["sesijaklijent_1"] = [{k: v for k, v in x.__dict__.items() if k != "_sa_instance_state"} for x in sesijaklijent_list]
-
-            sesijagrupa_list = database.query(SesijaGrupa).filter(SesijaGrupa.sesija_1_id == sesija_item.id, SesijaGrupa.tenant_id == tenant_id).all()
-            item_dict["sesijagrupa_1"] = [{k: v for k, v in x.__dict__.items() if k != "_sa_instance_state"} for x in sesijagrupa_list]
-
+            item_dict = _row_dict(sesija_item)
+            item_dict["cena"] = cena_by.get(sesija_item.id, [])
+            item_dict["sesijaklijent_1"] = sk_by.get(sesija_item.id, [])
+            item_dict["sesijagrupa_1"] = sg_by.get(sesija_item.id, [])
             item_dict["placeno"] = sesija_item.id in paid_sesija_ids
             result.append(item_dict)
 
@@ -2662,34 +2697,30 @@ def get_all_grupa(
 ):
     grupa_list = database.query(Grupa).filter(Grupa.tenant_id == tenant_id).all()
 
+    memberships = database.query(GrupaKlijent).filter(GrupaKlijent.tenant_id == tenant_id).all()
+
     if not detailed:
+        member_counts = Counter(gk.grupa_id for gk in memberships)
         result = []
         for g in grupa_list:
-            item = g.__dict__.copy()
-            item.pop('_sa_instance_state', None)
-            member_count = database.query(GrupaKlijent).filter(GrupaKlijent.grupa_id == g.id, GrupaKlijent.tenant_id == tenant_id).count()
-            item["broj_clanova"] = member_count
+            item = _row_dict(g)
+            item["broj_clanova"] = member_counts.get(g.id, 0)
             result.append(item)
         return result
 
+    sg_by = _group_rows(database.query(SesijaGrupa).filter(SesijaGrupa.tenant_id == tenant_id).all(), "grupa_id")
+    klijenti = {k.id: k for k in database.query(Klijent).filter(Klijent.tenant_id == tenant_id).all()}
+    members_by = {}
+    for gk in memberships:
+        klijent = klijenti.get(gk.klijent_id)
+        if klijent:
+            members_by.setdefault(gk.grupa_id, []).append(_row_dict(klijent))
+
     result = []
     for grupa_item in grupa_list:
-        item_dict = grupa_item.__dict__.copy()
-        item_dict.pop('_sa_instance_state', None)
-
-        sesijagrupa_list = database.query(SesijaGrupa).filter(SesijaGrupa.grupa_id == grupa_item.id, SesijaGrupa.tenant_id == tenant_id).all()
-        item_dict["sesijagrupa"] = [{k: v for k, v in x.__dict__.items() if k != "_sa_instance_state"} for x in sesijagrupa_list]
-
-        gk_list = database.query(GrupaKlijent).filter(GrupaKlijent.grupa_id == grupa_item.id, GrupaKlijent.tenant_id == tenant_id).all()
-        clanovi = []
-        for gk in gk_list:
-            klijent = database.query(Klijent).filter(Klijent.id == gk.klijent_id, Klijent.tenant_id == tenant_id).first()
-            if klijent:
-                kd = klijent.__dict__.copy()
-                kd.pop("_sa_instance_state", None)
-                clanovi.append(kd)
-
-        item_dict["clanovi"] = clanovi
+        item_dict = _row_dict(grupa_item)
+        item_dict["sesijagrupa"] = sg_by.get(grupa_item.id, [])
+        item_dict["clanovi"] = members_by.get(grupa_item.id, [])
         result.append(item_dict)
 
     return result
@@ -2805,17 +2836,14 @@ def get_all_klijent(
     if not detailed:
         return klijent_list
 
+    sk_by = _group_rows(database.query(SesijaKlijent).filter(SesijaKlijent.tenant_id == tenant_id).all(), "klijent_id")
+    cena_by = _group_rows(database.query(Cena).filter(Cena.tenant_id == tenant_id).all(), "klijent_1_id")
+
     result = []
     for klijent_item in klijent_list:
-        item_dict = klijent_item.__dict__.copy()
-        item_dict.pop('_sa_instance_state', None)
-
-        sesijaklijent_list = database.query(SesijaKlijent).filter(SesijaKlijent.klijent_id == klijent_item.id, SesijaKlijent.tenant_id == tenant_id).all()
-        item_dict["sesijaklijent"] = [{k: v for k, v in x.__dict__.items() if k != "_sa_instance_state"} for x in sesijaklijent_list]
-
-        cena_list = database.query(Cena).filter(Cena.klijent_1_id == klijent_item.id, Cena.tenant_id == tenant_id).all()
-        item_dict["cena_1"] = [{k: v for k, v in x.__dict__.items() if k != "_sa_instance_state"} for x in cena_list]
-
+        item_dict = _row_dict(klijent_item)
+        item_dict["sesijaklijent"] = sk_by.get(klijent_item.id, [])
+        item_dict["cena_1"] = cena_by.get(klijent_item.id, [])
         result.append(item_dict)
 
     return result
@@ -4381,6 +4409,13 @@ def _recompute_client_free_sessions(db: Session, klijent_id: int):
         s.is_free = idx < FREE_SESSIONS_COUNT
 
 
+def _admin_session_load_options():
+    return (
+        selectinload(Sesija.sesijaklijent_1).joinedload(SesijaKlijent.klijent).joinedload(Klijent.therapist),
+        joinedload(Sesija.therapist),
+    )
+
+
 def _sesija_effective_therapist_id(s: "Sesija") -> Optional[int]:
     """A session's attributed therapist: its own therapist_id if set,
     otherwise inherited from its client's assigned therapist. Historical
@@ -4416,10 +4451,32 @@ def _fetch_admin_base_data(db: Session):
     """The admin area is intentionally global/cross-tenant (by design -
     every client, therapist and session in the whole application, not
     just the calling admin's own tenant), so these are unfiltered."""
-    clients = db.query(Klijent).all()
-    sessions = db.query(Sesija).all()
-    for s in sessions:
-        s.effective_therapist_id = _sesija_effective_therapist_id(s)
+    # Only the columns the stats need, as plain rows: building full ORM
+    # objects for every client/session in the app was the slow part.
+    clients = db.query(
+        Klijent.id, Klijent.therapist_id, Klijent.status, Klijent.gender,
+        Klijent.date_started, Klijent.created_at,
+    ).all()
+
+    # A session's therapist is its own therapist_id, else its (first)
+    # client's assigned therapist - same rule as _sesija_effective_therapist_id,
+    # done in one query instead of two lookups per session.
+    first_client = (
+        db.query(SesijaKlijent.sesija_id.label("sesija_id"), func.min(SesijaKlijent.klijent_id).label("klijent_id"))
+        .group_by(SesijaKlijent.sesija_id)
+        .subquery()
+    )
+    sessions = (
+        db.query(
+            Sesija.id,
+            Sesija.pocetak,
+            Sesija.is_free,
+            func.coalesce(Sesija.therapist_id, Klijent.therapist_id).label("effective_therapist_id"),
+        )
+        .outerjoin(first_client, first_client.c.sesija_id == Sesija.id)
+        .outerjoin(Klijent, Klijent.id == first_client.c.klijent_id)
+        .all()
+    )
     return clients, sessions
 
 
@@ -4461,9 +4518,22 @@ def _sesija_admin_payload(s: "Sesija", session_number: Optional[int] = None) -> 
     }
 
 
-def _therapist_stats_from(therapist: "UserProfile", clients_all, sessions_all, start_date, end_date) -> dict:
-    my_clients = [c for c in clients_all if c.therapist_id == therapist.id]
-    my_sessions = [s for s in sessions_all if s.effective_therapist_id == therapist.id]
+def _all_therapist_stats(therapists, clients_all, sessions_all, start_date, end_date) -> list:
+    """Stats for every therapist, grouping clients/sessions by therapist in
+    one pass - instead of re-scanning all data once per therapist."""
+    clients_by = {}
+    for c in clients_all:
+        clients_by.setdefault(c.therapist_id, []).append(c)
+    sessions_by = {}
+    for s in sessions_all:
+        sessions_by.setdefault(s.effective_therapist_id, []).append(s)
+    return [
+        _therapist_stats_from(t, clients_by.get(t.id, []), sessions_by.get(t.id, []), start_date, end_date)
+        for t in therapists
+    ]
+
+
+def _therapist_stats_from(therapist: "UserProfile", my_clients, my_sessions, start_date, end_date) -> dict:
     clients_in_range = [c for c in my_clients if _in_range(_effective_client_date(c), start_date, end_date)]
     sessions_in_range = [s for s in my_sessions if _in_range(s.pocetak.date(), start_date, end_date)]
     return {
@@ -4581,7 +4651,7 @@ def admin_list_therapists(
 ):
     therapists = database.query(UserProfile).order_by(UserProfile.created_at).all()
     clients_all, sessions_all = _fetch_admin_base_data(database)
-    rows = [_therapist_stats_from(t, clients_all, sessions_all, start_date, end_date) for t in therapists]
+    rows = _all_therapist_stats(therapists, clients_all, sessions_all, start_date, end_date)
 
     client_ranks = _rank_map([(r["user_id"], r["clients_in_range"]) for r in rows])
     session_ranks = _rank_map([(r["user_id"], r["sessions_in_range"]) for r in rows])
@@ -4622,7 +4692,7 @@ def admin_get_therapist(
 
     all_therapists = database.query(UserProfile).all()
     clients_all, sessions_all = _fetch_admin_base_data(database)
-    all_rows = [_therapist_stats_from(t, clients_all, sessions_all, start_date, end_date) for t in all_therapists]
+    all_rows = _all_therapist_stats(all_therapists, clients_all, sessions_all, start_date, end_date)
 
     client_ranks = _rank_map([(r["user_id"], r["clients_in_range"]) for r in all_rows])
     session_ranks = _rank_map([(r["user_id"], r["sessions_in_range"]) for r in all_rows])
@@ -4638,7 +4708,7 @@ def admin_get_therapist(
     clients = database.query(Klijent).filter(Klijent.therapist_id == user_id).order_by(Klijent.created_at.desc()).all()
     inherited_session_ids = _session_ids_via_therapist_clients(database, user_id)
     sessions = (
-        database.query(Sesija)
+        database.query(Sesija).options(*_admin_session_load_options())
         .filter(or_(Sesija.therapist_id == user_id, Sesija.id.in_(inherited_session_ids or [-1])))
         .order_by(Sesija.pocetak.desc()).limit(200).all()
     )
@@ -4942,7 +5012,7 @@ def admin_list_clients(
     page = max(1, page)
     page_size = max(1, min(page_size, 200))
 
-    query = database.query(Klijent)
+    query = database.query(Klijent).options(joinedload(Klijent.therapist))
     if therapist_id is not None:
         query = query.filter(Klijent.therapist_id == therapist_id)
     if status:
@@ -5036,7 +5106,7 @@ def admin_get_client(
         ).all()
     ]
     sessions = (
-        database.query(Sesija).filter(Sesija.id.in_(sesija_ids))
+        database.query(Sesija).options(*_admin_session_load_options()).filter(Sesija.id.in_(sesija_ids))
         .order_by(Sesija.pocetak.asc()).all()
         if sesija_ids else []
     )
@@ -5120,7 +5190,7 @@ def admin_list_sessions(
     page = max(1, page)
     page_size = max(1, min(page_size, 200))
 
-    query = database.query(Sesija)
+    query = database.query(Sesija).options(*_admin_session_load_options())
     if therapist_id is not None:
         inherited_ids = _session_ids_via_therapist_clients(database, therapist_id)
         query = query.filter(or_(Sesija.therapist_id == therapist_id, Sesija.id.in_(inherited_ids or [-1])))
