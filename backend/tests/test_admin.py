@@ -728,65 +728,27 @@ def test_reminder_dry_run_reports_without_sending_or_marking(seeded):
 
 
 # --------------------------------------------------------------------------
-# Public "Find a Therapist" booking now sends an admin intake request
-# instead of auto-booking a session with an auto-matched therapist
+# Public "Find a Therapist": only the intake request exists - the old
+# matching/self-booking endpoints are gone
 # --------------------------------------------------------------------------
 
-def test_public_booking_sends_intake_email_without_auto_creating_session(monkeypatch):
+def test_old_public_matching_and_booking_endpoints_are_removed(seeded):
+    tenant_id = seeded["other_tenant_id"]
+    assert client.get("/public/therapists").status_code == 404
+    assert client.get("/public/therapists", params={"tags": "anksioznost"}).status_code == 404
+    assert client.get(f"/public/therapists/{tenant_id}/availability").status_code == 404
+    resp = client.post(f"/public/therapists/{tenant_id}/book", json={
+        "ime": "A", "prezime": "B", "email": "book@example.com",
+        "pocetak": "2030-01-01T10:00:00", "kraj": "2030-01-01T11:00:00",
+    })
+    assert resp.status_code == 404
+
     db = SessionLocal()
     try:
-        tenant = Tenant(
-            name="Public Intake Tenant",
-            trial_ends_at=datetime.utcnow() + timedelta(days=30),
-            working_hours=json.dumps(
-                {str(i): {"active": True, "start": "09:00", "end": "17:00"} for i in range(7)}
-            ),
-        )
-        db.add(tenant)
-        db.commit()
-        tenant_id = tenant.id
+        assert db.query(Klijent).filter(Klijent.email == "book@example.com").first() is None
     finally:
         db.close()
 
-    avail = client.get(f"/public/therapists/{tenant_id}/availability")
-    assert avail.status_code == 200
-    slots = avail.json()["slots"]
-    assert len(slots) > 0
-    slot = slots[0]
-
-    sent_emails = []
-    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent_emails.append(payload))
-
-    resp = client.post(
-        f"/public/therapists/{tenant_id}/book",
-        json={
-            "ime": "Public", "prezime": "Klijent", "email": "public-intake@example.com",
-            "telefon": None, "napomena": "Trazim pomoc", "pocetak": slot["start"], "kraj": slot["end"],
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "sesija_id" not in body
-    assert body["tenant_name"] == "Public Intake Tenant"
-
-    db2 = SessionLocal()
-    try:
-        new_client = db2.query(Klijent).filter(
-            Klijent.tenant_id == tenant_id, Klijent.email == "public-intake@example.com"
-        ).first()
-        assert new_client is not None
-        assert new_client.therapist_id is None  # no auto-assignment anymore
-        assert db2.query(Sesija).filter(Sesija.tenant_id == tenant_id).count() == 0  # no auto-booked session
-    finally:
-        db2.close()
-
-    assert len(sent_emails) == 1
-    assert sent_emails[0]["to"] == [main_api.PUBLIC_INTAKE_NOTIFY_EMAIL]
-
-
-# --------------------------------------------------------------------------
-# Simplified public intake (no more therapist matching/self-booking)
-# --------------------------------------------------------------------------
 
 def test_public_intake_request_creates_unassigned_client_and_emails_admin(monkeypatch):
     sent_emails = []

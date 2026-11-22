@@ -62,7 +62,7 @@ def _secret_matches(provided: Optional[str], expected: str) -> bool:
     return bool(provided) and hmac.compare_digest(provided.encode(), expected.encode())
 
 # Where public "Find a Therapist" booking requests get emailed for manual
-# review/assignment (see public_book_session below).
+# review/assignment (see public_intake_request below).
 PUBLIC_INTAKE_NOTIFY_EMAIL = os.getenv("PUBLIC_INTAKE_NOTIFY_EMAIL", "czmzns@gmail.com")
 
 ############################################
@@ -3141,64 +3141,9 @@ def list_klijent_sesije(
 
 ############################################
 #
-#   Client-Facing Matching & Public Booking
+#   Tenant settings (profile shown to clients)
 #
 ############################################
-
-SLOT_MINUTES = 60
-
-
-def compute_available_slots(tenant_id: int, database: Session, days: int = 14):
-    """Working hours minus already-booked sessions, as 1-hour blocks for the
-    next `days` days. Naive local datetimes throughout, consistent with how
-    Sesija.pocetak/kraj are already stored and used elsewhere in this app."""
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant or not tenant.working_hours:
-        return []
-
-    try:
-        hours_by_weekday = json.loads(tenant.working_hours)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    now = datetime.utcnow()
-    range_end = now + timedelta(days=days)
-
-    existing_sessions = database.query(Sesija).filter(
-        Sesija.tenant_id == tenant_id,
-        Sesija.status != "otkazano",
-        Sesija.kraj >= now,
-        Sesija.pocetak <= range_end,
-    ).all()
-    booked_ranges = [(s.pocetak, s.kraj) for s in existing_sessions]
-
-    def overlaps(start, end):
-        return any(start < b_end and end > b_start for b_start, b_end in booked_ranges)
-
-    slots = []
-    for i in range(days):
-        day = (now + timedelta(days=i)).date()
-        config = hours_by_weekday.get(str(day.weekday()))
-        if not config or not config.get("active"):
-            continue
-        try:
-            start_h, start_m = (int(x) for x in config["start"].split(":"))
-            end_h, end_m = (int(x) for x in config["end"].split(":"))
-        except (KeyError, ValueError, AttributeError):
-            continue
-
-        cursor = datetime.combine(day, dt_time(start_h, start_m))
-        day_end = datetime.combine(day, dt_time(end_h, end_m))
-
-        while cursor + timedelta(minutes=SLOT_MINUTES) <= day_end:
-            slot_end = cursor + timedelta(minutes=SLOT_MINUTES)
-            if cursor > now and not overlaps(cursor, slot_end):
-                slots.append({"start": cursor, "end": slot_end})
-            cursor = slot_end
-
-    slots.sort(key=lambda s: s["start"])
-    return slots
-
 
 MAX_PHOTO_DATA_URL_LENGTH = 2_000_000  # ~1.4MB decoded - plenty for a resized avatar
 
@@ -3277,79 +3222,16 @@ def get_owner_name(tenant_id: int, database: Session) -> str:
     return ""
 
 
-@app.get("/public/therapists", tags=["Public"])
-def public_search_therapists(
-        tags: str = "",
-        database: Session = Depends(get_db)
-):
-    """Cross-tenant client-facing search. No tenant header - same public,
-    read-only trust model as /auth/invite-info."""
-    requested = {t.strip() for t in tags.split(",") if t.strip()}
-
-    tenants = database.query(Tenant).filter(
-        Tenant.specialties.isnot(None), Tenant.specialties != ""
-    ).all()
-
-    results = []
-    for tenant in tenants:
-        tenant_tags = {t.strip() for t in tenant.specialties.split(",") if t.strip()}
-        matched = (tenant_tags & requested) if requested else tenant_tags
-        if requested and not matched:
-            continue
-
-        slots = compute_available_slots(tenant.id, database)
-        if not slots:
-            continue
-
-        results.append({
-            "tenant_id": tenant.id,
-            "name": tenant.name,
-            "therapist_name": get_owner_name(tenant.id, database) or tenant.name,
-            "photo_url": tenant.photo_url,
-            "specialties": sorted(tenant_tags),
-            "matched_tags": sorted(matched),
-            "match_count": len(matched),
-            "next_available": slots[0]["start"].isoformat(),
-        })
-
-    results.sort(key=lambda r: (-r["match_count"], r["next_available"]))
-    return results
-
-
-@app.get("/public/therapists/{tenant_id}/availability", tags=["Public"])
-def public_therapist_availability(
-        tenant_id: int,
-        days: int = 14,
-        database: Session = Depends(get_db)
-):
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    slots = compute_available_slots(tenant_id, database, days=min(days, 30))
-    return {
-        "tenant_id": tenant.id,
-        "name": tenant.name,
-        "therapist_name": get_owner_name(tenant_id, database) or tenant.name,
-        "photo_url": tenant.photo_url,
-        "slots": [
-            {"start": s["start"].isoformat(), "end": s["end"].isoformat()}
-            for s in slots
-        ],
-    }
-
-
 ############################################
 #
-#   Public support-request intake (current flow)
+#   Public support-request intake
 #
-#   Per product decision, the public "Find a Therapist" page no longer
-#   matches/lists therapists or lets a client pick a specific slot - it
-#   just collects what's troubling them (categories + a free-text
-#   description) plus contact info, and an admin manually assigns a
-#   therapist afterward. Everything below public_search_therapists is the
-#   PREVIOUS therapist-matching/self-booking flow, kept but no longer
-#   wired to the frontend (see the comment near public_book_session).
+#   The public "Find a Therapist" page doesn't list therapists or let a
+#   client pick a slot - it collects what's troubling them (categories +
+#   a free-text description) plus contact info, and an admin manually
+#   assigns a therapist afterward. (The old matching/self-booking
+#   endpoints /public/therapists, .../availability and .../book were
+#   removed - they were unauthenticated and no longer used.)
 #
 ############################################
 
@@ -3456,207 +3338,6 @@ def public_intake_request(
     send_public_support_request_email(klijent, data)
 
     return {"klijent_ime": f"{klijent.ime} {klijent.prezime}"}
-
-
-class PublicBookingRequest(BaseModel):
-    ime: str
-    prezime: str
-    email: str
-    telefon: str | None = None
-    napomena: str | None = None
-    pocetak: datetime
-    kraj: datetime
-
-
-def send_public_booking_emails(tenant_name, therapist_emails, klijent, sesija, napomena):
-    """Best-effort notification emails for an online booking - a failure
-    here must never block the booking itself, which is why every send is
-    wrapped and only logged on error."""
-    klijent_ime = f"{klijent.ime} {klijent.prezime}"
-
-    try:
-        client_html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">✅ Termin je zakazan</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(klijent_ime)}</strong>,</div>
-<div style="font-size:15px;color:#1a1a1a;">Vaš termin kod <strong>{_esc(tenant_name)}</strong> je uspešno zakazan.</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
-<div style="font-size:15px;font-weight:600;color:#111;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
-</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:20px 24px;margin-bottom:8px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:13px;color:#777;line-height:1.5;"><strong>Pravila otkazivanja</strong><br>Termin se može otkazati najkasnije <strong>24 sata</strong> unapred.</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": [klijent.email],
-            "subject": f"✅ Potvrda termina - {format_date_long(sesija.pocetak)}",
-            "html": client_html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send booking confirmation to client: {e}")
-
-    if not therapist_emails:
-        return
-
-    try:
-        napomena_row = (
-            f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Napomena klijenta:</strong> {_esc(napomena)}</div>'
-            if napomena else ""
-        )
-        therapist_html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">🔔 Novi termin zakazan online</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent <strong>{_esc(klijent_ime)}</strong> je preko "Pronađi terapeuta" zakazao termin.</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
-<div style="font-size:14px;color:#555;">{_esc(klijent_ime)} · {_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
-{napomena_row}
-</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-<strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": therapist_emails,
-            "subject": f"🔔 Novo zakazivanje - {klijent_ime}",
-            "html": therapist_html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send booking notification to therapist: {e}")
-
-
-def send_public_intake_request_email(tenant: "Tenant", klijent: "Klijent", data: "PublicBookingRequest"):
-    """A client submitted a request through the public 'Find a Therapist'
-    flow - notifies the center admin so a person assigns the client to
-    the appropriate therapist, rather than the system auto-booking a
-    confirmed session with whichever therapist happened to be matched."""
-    napomena_row = (
-        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Poruka klijenta:</strong> {_esc(data.napomena)}</div>'
-        if data.napomena else ""
-    )
-    html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">📩 Novi zahtev klijenta</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent je preko stranice "Pronađi terapeuta" poslao zahtev za praksu <strong>{_esc(tenant.name or "")}</strong>. Dodelite terapeuta ručno u Admin centru (Klijenti).</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{_esc(klijent.ime)} {_esc(klijent.prezime)}</div>
-<div style="font-size:14px;color:#555;">{_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
-<div style="font-size:14px;color:#555;margin-top:10px;">📅 Traženi termin: <strong>{format_date_long(data.pocetak)}</strong>, {format_time(data.pocetak)}–{format_time(data.kraj)}</div>
-<div style="font-size:14px;color:#555;margin-top:6px;">🏷️ Kategorije prakse: {_esc(tenant.specialties or "—")}</div>
-{napomena_row}
-</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-<strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-    try:
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": [PUBLIC_INTAKE_NOTIFY_EMAIL],
-            "subject": f"📩 Novi zahtev klijenta - {klijent.ime} {klijent.prezime}",
-            "html": html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send public intake request email: {e}")
-
-
-@app.post("/public/therapists/{tenant_id}/book", tags=["Public"])
-def public_book_session(
-        tenant_id: int,
-        data: PublicBookingRequest,
-        database: Session = Depends(get_db)
-):
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    # Re-validate server-side - the client only saw a snapshot of availability,
-    # and this endpoint is unauthenticated so nothing about the request can be trusted.
-    available = compute_available_slots(tenant_id, database)
-    if not any(s["start"] == data.pocetak and s["end"] == data.kraj for s in available):
-        raise HTTPException(status_code=409, detail="Traženi termin više nije dostupan")
-
-    klijent = database.query(Klijent).filter(
-        Klijent.tenant_id == tenant_id, Klijent.email == data.email
-    ).first()
-    if not klijent:
-        klijent = Klijent(
-            tenant_id=tenant_id,
-            ime=data.ime,
-            prezime=data.prezime,
-            email=data.email,
-            broj_telefona=data.telefon or "",
-        )
-        database.add(klijent)
-        database.flush()
-
-    # Disabled per product decision: the system no longer auto-books a
-    # confirmed session with an automatically-matched therapist. An admin
-    # now reviews each public request (emailed below) and assigns the
-    # client to the appropriate therapist manually in the admin area.
-    # Left here, commented out, in case this needs to be restored.
-    #
-    # sesija = Sesija(
-    #     tenant_id=tenant_id,
-    #     pocetak=data.pocetak,
-    #     kraj=data.kraj,
-    #     cena=tenant.default_price or 0,
-    #     status="zakazano",
-    # )
-    # database.add(sesija)
-    # database.flush()
-    #
-    # database.add(SesijaKlijent(
-    #     tenant_id=tenant_id,
-    #     klijent_id=klijent.id,
-    #     sesija_id=sesija.id,
-    # ))
-    #
-    # therapist_emails = [
-    #     p.email for p in
-    #     database.query(UserProfile).filter(UserProfile.tenant_id == tenant_id).all()
-    # ]
-    # send_public_booking_emails(tenant.name, therapist_emails, klijent, sesija, data.napomena)
-
-    database.commit()
-    database.refresh(klijent)
-
-    send_public_intake_request_email(tenant, klijent, data)
-
-    return {
-        "tenant_name": tenant.name,
-        "klijent_ime": f"{klijent.ime} {klijent.prezime}",
-        "pocetak": data.pocetak.isoformat(),
-        "kraj": data.kraj.isoformat(),
-    }
 
 
 def send_session_reminder_email(klijent, sesija, therapist_name):
