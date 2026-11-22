@@ -4,7 +4,8 @@ import time as time_module
 import hmac, hashlib, base64
 import logging
 from datetime import datetime, timedelta, time as dt_time, date
-from collections import Counter
+from collections import Counter, deque
+import threading
 from fastapi import Depends, FastAPI, HTTPException, Request, status, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -698,7 +699,8 @@ async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.detail if isinstance(exc.detail, str) else "HTTP Error", "message": exc.detail, "detail": f"HTTP {exc.status_code} error occurred"}
+        content={"error": exc.detail if isinstance(exc.detail, str) else "HTTP Error", "message": exc.detail, "detail": f"HTTP {exc.status_code} error occurred"},
+        headers=getattr(exc, "headers", None),  # e.g. Retry-After on 429
     )
 
 
@@ -3307,11 +3309,88 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
         logger.error(f"Failed to send public support-request email: {e}")
 
 
+class SlidingWindowRateLimiter:
+    """In-memory sliding-window limiter: at most `limit` hits per key
+    within `window_seconds`. State lives in this process only - fine for
+    the single Render instance; with several workers/instances each one
+    counts separately (move to Redis or similar at that point)."""
+
+    def __init__(self, limit: int, window_seconds: int):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> Optional[int]:
+        """Records a hit. Returns None if allowed, otherwise the number of
+        seconds until the next hit would be allowed."""
+        now = time_module.monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            hits = self._hits.setdefault(key, deque())
+            while hits and hits[0] <= cutoff:
+                hits.popleft()
+            if len(hits) >= self.limit:
+                return max(1, int(hits[0] + self.window_seconds - now) + 1)
+            hits.append(now)
+            # Keep memory bounded: occasionally drop keys with no recent hits.
+            if len(self._hits) > 10_000:
+                for k in [k for k, v in self._hits.items() if not v or v[-1] <= cutoff]:
+                    del self._hits[k]
+            return None
+
+    def reset(self):
+        with self._lock:
+            self._hits.clear()
+
+
+# Public intake form: per client IP, plus per submitted email address (so
+# one address can't be flooded from many IPs). Both configurable.
+INTAKE_RATE_LIMIT_PER_IP = int(os.getenv("INTAKE_RATE_LIMIT_PER_IP", "5"))
+INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS = int(os.getenv("INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS", "600"))
+INTAKE_RATE_LIMIT_PER_EMAIL = int(os.getenv("INTAKE_RATE_LIMIT_PER_EMAIL", "3"))
+INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS = int(os.getenv("INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS", "3600"))
+# How many reverse proxies sit in front of the app and append to
+# X-Forwarded-For (Render's load balancer = 1). The client IP is taken
+# that many entries from the RIGHT, because the left part of the header
+# is whatever the caller sent and can be faked.
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+
+_intake_ip_limiter = SlidingWindowRateLimiter(INTAKE_RATE_LIMIT_PER_IP, INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS)
+_intake_email_limiter = SlidingWindowRateLimiter(INTAKE_RATE_LIMIT_PER_EMAIL, INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    if TRUSTED_PROXY_HOPS > 0 and forwarded:
+        return forwarded[-min(TRUSTED_PROXY_HOPS, len(forwarded))]
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limited(retry_after: int):
+    raise HTTPException(
+        status_code=429,
+        detail="Previše zahteva. Pokušajte ponovo malo kasnije.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 @app.post("/public/intake-request", tags=["Public"])
 def public_intake_request(
         data: PublicIntakeRequest,
+        request: Request,
         database: Session = Depends(get_db),
 ):
+    # Counted before validation on purpose - invalid submissions are spam too.
+    retry_after = _intake_ip_limiter.hit(_client_ip(request))
+    if retry_after:
+        _rate_limited(retry_after)
+    email_key = (data.email or "").strip().lower()
+    if email_key:
+        retry_after = _intake_email_limiter.hit(email_key)
+        if retry_after:
+            _rate_limited(retry_after)
+
     if not data.ime.strip() or not data.prezime.strip() or not data.email.strip():
         raise HTTPException(status_code=400, detail="Ime, prezime i email su obavezni")
     if not data.tags and not (data.opis and data.opis.strip()):

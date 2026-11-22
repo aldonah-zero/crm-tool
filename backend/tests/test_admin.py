@@ -1308,3 +1308,77 @@ def test_session_email_escapes_client_and_group_names(monkeypatch):
         assert "<img" not in payload["html"]
         assert "evil.example\">" not in payload["html"]
     assert 'href="https://x.example/?a=1&amp;b=&quot;2&quot;"' in sent[-1]["html"]
+
+
+# --------------------------------------------------------------------------
+# Rate limiting on the public intake form
+# --------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_intake_rate_limits():
+    """Every test starts with fresh counters, so tests that post to the
+    intake form don't eat each other's quota."""
+    main_api._intake_ip_limiter.reset()
+    main_api._intake_email_limiter.reset()
+    yield
+    main_api._intake_ip_limiter.reset()
+    main_api._intake_email_limiter.reset()
+
+
+def _intake_body(email: str) -> dict:
+    return {"ime": "Rate", "prezime": "Limit", "email": email, "tags": ["Anksioznost"]}
+
+
+def test_intake_request_is_rate_limited_per_ip(monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    headers = {"X-Forwarded-For": "203.0.113.10"}
+    limit = main_api.INTAKE_RATE_LIMIT_PER_IP
+
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body(f"ip-{i}@example.com"),
+                           headers=headers).status_code == 200
+
+    blocked = client.post("/public/intake-request", json=_intake_body("ip-extra@example.com"), headers=headers)
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) > 0
+
+    # Invalid submissions count too - they're the cheapest spam.
+    assert client.post("/public/intake-request", json={"ime": "", "prezime": "", "email": "", "tags": []},
+                       headers=headers).status_code == 429
+
+    # A different client IP is unaffected.
+    assert client.post("/public/intake-request", json=_intake_body("ip-other@example.com"),
+                       headers={"X-Forwarded-For": "203.0.113.11"}).status_code == 200
+
+
+def test_intake_rate_limit_cannot_be_dodged_by_faking_forwarded_for(monkeypatch):
+    """Only the entry added by the trusted proxy (rightmost) counts - a
+    caller prepending random IPs still hits the same bucket."""
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    limit = main_api.INTAKE_RATE_LIMIT_PER_IP
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body(f"fake-{i}@example.com"),
+                           headers={"X-Forwarded-For": f"10.0.0.{i}, 198.51.100.7"}).status_code == 200
+    assert client.post("/public/intake-request", json=_intake_body("fake-x@example.com"),
+                       headers={"X-Forwarded-For": "10.9.9.9, 198.51.100.7"}).status_code == 429
+
+
+def test_intake_request_is_rate_limited_per_email(monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    limit = main_api.INTAKE_RATE_LIMIT_PER_EMAIL
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body("Same@Example.com"),
+                           headers={"X-Forwarded-For": f"192.0.2.{i}"}).status_code == 200
+    assert client.post("/public/intake-request", json=_intake_body("same@example.com"),
+                       headers={"X-Forwarded-For": "192.0.2.200"}).status_code == 429
+
+
+def test_sliding_window_limiter_allows_again_after_window(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(main_api.time_module, "monotonic", lambda: clock[0])
+    limiter = main_api.SlidingWindowRateLimiter(limit=2, window_seconds=60)
+    assert limiter.hit("k") is None
+    assert limiter.hit("k") is None
+    assert limiter.hit("k") == 61
+    clock[0] += 61
+    assert limiter.hit("k") is None

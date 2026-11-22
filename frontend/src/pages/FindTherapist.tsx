@@ -142,8 +142,12 @@ const FindTherapist: React.FC = () => {
       });
       setDoneName(res.data.klijent_ime || form.ime);
       setStep("done");
-    } catch {
-      setError("Greška pri slanju zahteva. Pokušajte ponovo.");
+    } catch (err: any) {
+      setError(
+        err?.response?.status === 429
+          ? "Poslali ste previše zahteva. Pokušajte ponovo za nekoliko minuta."
+          : "Greška pri slanju zahteva. Pokušajte ponovo.",
+      );
     } finally {
       setLoading(false);
     }
