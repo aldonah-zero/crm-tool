@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 import resend
 import os
+from html import escape as _esc  # every user-supplied value in an email's HTML goes through this
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
@@ -427,7 +428,7 @@ def send_session_email(action, client_name, pocetak, kraj, cena, client_email=No
 
 <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Individualna sesija</div>
 <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
-<div style="font-size:14px;color:#555;margin-bottom:16px;">{client_name} · {cena:,.2f} RSD</div>
+<div style="font-size:14px;color:#555;margin-bottom:16px;">{_esc(client_name)} · {cena:,.2f} RSD</div>
 
 <div style="border-top:1.5px dashed #d1d5db;margin:0 0 16px;"></div>
 
@@ -469,7 +470,7 @@ Hvala vam što ste odabrali <strong style="color:#6b7280;">PsihApp</strong>.
 
     <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
     <div style="font-size:22px;margin-bottom:8px;">✅ Potvrda zakazane sesije</div>
-    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{client_name}</strong>,</div>
+    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(client_name)}</strong>,</div>
     <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Vaša sesija je uspešno zakazana.</div>
     </div>
 
@@ -544,7 +545,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
 
 <div style="font-size:15px;color:#333;margin-bottom:14px;">📅 <strong>{format_date_long(pocetak)}</strong></div>
 
-<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {grupa_naziv}</div>
+<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {_esc(grupa_naziv)}</div>
 <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
 <div style="font-size:14px;color:#555;margin-bottom:16px;">{cena:,.2f} RSD</div>
 
@@ -586,7 +587,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
 
     <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
     <div style="font-size:22px;margin-bottom:8px;">{c['icon']} {c['title']}</div>
-    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{member_name}</strong>,</div>
+    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(member_name)}</strong>,</div>
     <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">{c['greeting']}</div>
     </div>
 
@@ -594,7 +595,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
     <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
 
     <div style="font-size:15px;color:#333;margin-bottom:14px;">📅 <strong>{format_date_long(pocetak)}</strong></div>
-    <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {grupa_naziv}</div>
+    <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {_esc(grupa_naziv)}</div>
     <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
 
     <div style="border-top:1.5px dashed #d1d5db;margin:16px 0;"></div>
@@ -3389,7 +3390,7 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
     wrapped try/except."""
     tags_label = ", ".join(data.tags) if data.tags else "—"
     opis_row = (
-        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Opis situacije:</strong> {data.opis}</div>'
+        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Opis situacije:</strong> {_esc(data.opis)}</div>'
         if data.opis else ""
     )
     html = f"""
@@ -3401,9 +3402,9 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{klijent.ime} {klijent.prezime}</div>
-<div style="font-size:14px;color:#555;">{klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
-<div style="font-size:14px;color:#555;margin-top:10px;">🏷️ Oblasti: {tags_label}</div>
+<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{_esc(klijent.ime)} {_esc(klijent.prezime)}</div>
+<div style="font-size:14px;color:#555;">{_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
+<div style="font-size:14px;color:#555;margin-top:10px;">🏷️ Oblasti: {_esc(tags_label)}</div>
 {opis_row}
 </div>
 </div>
@@ -3479,8 +3480,8 @@ def send_public_booking_emails(tenant_name, therapist_emails, klijent, sesija, n
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">✅ Termin je zakazan</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
-<div style="font-size:15px;color:#1a1a1a;">Vaš termin kod <strong>{tenant_name}</strong> je uspešno zakazan.</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(klijent_ime)}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;">Vaš termin kod <strong>{_esc(tenant_name)}</strong> je uspešno zakazan.</div>
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
@@ -3511,7 +3512,7 @@ Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
 
     try:
         napomena_row = (
-            f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Napomena klijenta:</strong> {napomena}</div>'
+            f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Napomena klijenta:</strong> {_esc(napomena)}</div>'
             if napomena else ""
         )
         therapist_html = f"""
@@ -3519,13 +3520,13 @@ Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">🔔 Novi termin zakazan online</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent <strong>{klijent_ime}</strong> je preko "Pronađi terapeuta" zakazao termin.</div>
+<div style="font-size:15px;color:#1a1a1a;">Klijent <strong>{_esc(klijent_ime)}</strong> je preko "Pronađi terapeuta" zakazao termin.</div>
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
 <div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
 <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
-<div style="font-size:14px;color:#555;">{klijent_ime} · {klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
+<div style="font-size:14px;color:#555;">{_esc(klijent_ime)} · {_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
 {napomena_row}
 </div>
 </div>
@@ -3551,7 +3552,7 @@ def send_public_intake_request_email(tenant: "Tenant", klijent: "Klijent", data:
     the appropriate therapist, rather than the system auto-booking a
     confirmed session with whichever therapist happened to be matched."""
     napomena_row = (
-        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Poruka klijenta:</strong> {data.napomena}</div>'
+        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Poruka klijenta:</strong> {_esc(data.napomena)}</div>'
         if data.napomena else ""
     )
     html = f"""
@@ -3559,14 +3560,14 @@ def send_public_intake_request_email(tenant: "Tenant", klijent: "Klijent", data:
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">📩 Novi zahtev klijenta</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent je preko stranice "Pronađi terapeuta" poslao zahtev za praksu <strong>{tenant.name}</strong>. Dodelite terapeuta ručno u Admin centru (Klijenti).</div>
+<div style="font-size:15px;color:#1a1a1a;">Klijent je preko stranice "Pronađi terapeuta" poslao zahtev za praksu <strong>{_esc(tenant.name or "")}</strong>. Dodelite terapeuta ručno u Admin centru (Klijenti).</div>
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{klijent.ime} {klijent.prezime}</div>
-<div style="font-size:14px;color:#555;">{klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
+<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{_esc(klijent.ime)} {_esc(klijent.prezime)}</div>
+<div style="font-size:14px;color:#555;">{_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
 <div style="font-size:14px;color:#555;margin-top:10px;">📅 Traženi termin: <strong>{format_date_long(data.pocetak)}</strong>, {format_time(data.pocetak)}–{format_time(data.kraj)}</div>
-<div style="font-size:14px;color:#555;margin-top:6px;">🏷️ Kategorije prakse: {tenant.specialties or "—"}</div>
+<div style="font-size:14px;color:#555;margin-top:6px;">🏷️ Kategorije prakse: {_esc(tenant.specialties or "—")}</div>
 {napomena_row}
 </div>
 </div>
@@ -3670,8 +3671,8 @@ def send_session_reminder_email(klijent, sesija, therapist_name):
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">⏰ Podsetnik za sutra</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
-<div style="font-size:15px;color:#1a1a1a;">Podsećamo vas na termin kod <strong>{therapist_name}</strong> sutra.</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(klijent_ime)}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;">Podsećamo vas na termin kod <strong>{_esc(therapist_name)}</strong> sutra.</div>
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
@@ -4237,7 +4238,7 @@ def cancel_client_appointment(
                 "from": "PsihoApp <noreply@hrioapp.com>",
                 "to": therapist_emails,
                 "subject": f"🗑️ Klijent je otkazao termin - {klijent.ime} {klijent.prezime}",
-                "html": f"<p>{klijent.ime} {klijent.prezime} je otkazao/la termin zakazan za {format_date_long(sesija.pocetak)} u {format_time(sesija.pocetak)}.</p>",
+                "html": f"<p>{_esc(klijent.ime)} {_esc(klijent.prezime)} je otkazao/la termin zakazan za {format_date_long(sesija.pocetak)} u {format_time(sesija.pocetak)}.</p>",
             })
     except Exception as e:
         logger.error(f"Failed to send cancellation notice to therapist: {e}")
@@ -4792,7 +4793,7 @@ def send_therapist_approved_email(therapist: "UserProfile"):
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">✅ Nalog je odobren</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{name}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(name)}</strong>,</div>
 <div style="font-size:15px;color:#1a1a1a;">Vaš nalog je odobren od strane administratora. Sada možete da se prijavite (email/lozinka ili Google).</div>
 </div>
 <div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
@@ -4910,11 +4911,11 @@ def send_therapist_invite_email(email: str, full_name: Optional[str], action_lin
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">👋 Dobrodošli u PsihoApp</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{name}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(name)}</strong>,</div>
 <div style="font-size:15px;color:#1a1a1a;margin-bottom:10px;">Za Vas je otvoren nalog u PsihoApp aplikaciji. Kliknite na dugme ispod da potvrdite nalog - bićete automatski prijavljeni.</div>
 <div style="font-size:14px;color:#4b5563;margin-bottom:20px;">Ubuduće se prijavljujete samo unosom svog email-a: na stranici za prijavu kliknite „Pošalji link za prijavu“ i otvorite link iz mejla. Lozinka nije potrebna.</div>
-<a href="{action_link}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:10px;">Potvrdi nalog i prijavi se</a>
-<div style="font-size:12px;color:#9ca3af;margin-top:18px;">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br>{action_link}</div>
+<a href="{_esc(action_link)}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:10px;">Potvrdi nalog i prijavi se</a>
+<div style="font-size:12px;color:#9ca3af;margin-top:18px;">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br>{_esc(action_link)}</div>
 </div>
 <div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
 <strong style="color:#6b7280;">PsihoApp</strong>

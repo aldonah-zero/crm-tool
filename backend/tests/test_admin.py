@@ -1299,3 +1299,50 @@ def test_mark_subscription_paid_requires_correct_admin_secret(seeded):
     ok = client.post(url, json=body, headers={"X-Admin-Secret": os.environ["ADMIN_SECRET"]})
     assert ok.status_code == 200
     assert ok.json()["subscription_paid_until"]
+
+
+# --------------------------------------------------------------------------
+# Email HTML escaping - user input must never become markup in an email
+# --------------------------------------------------------------------------
+
+_EVIL = '<img src=x onerror="alert(1)"><a href="https://evil.example">klik</a>'
+
+
+def test_public_intake_email_escapes_user_input(monkeypatch):
+    sent_emails = []
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent_emails.append(payload))
+
+    resp = client.post("/public/intake-request", json={
+        "ime": "<b>Ime</b>", "prezime": _EVIL, "email": "escape-test@example.com",
+        "telefon": "<script>x</script>", "tags": ["<i>tag</i>"], "opis": _EVIL,
+    })
+    assert resp.status_code == 200
+
+    html_body = sent_emails[0]["html"]
+    for raw in ("<b>Ime</b>", "<img", "<a href=\"https://evil", "<script>", "<i>tag</i>"):
+        assert raw not in html_body
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in html_body
+    assert "&lt;b&gt;Ime&lt;/b&gt;" in html_body
+    assert "&lt;i&gt;tag&lt;/i&gt;" in html_body
+
+
+def test_session_email_escapes_client_and_group_names(monkeypatch):
+    sent = []
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent.append(payload))
+    start = datetime(2026, 5, 4, 10, 0)
+
+    main_api.send_session_email(
+        action="created", client_name=_EVIL, pocetak=start, kraj=start + timedelta(hours=1),
+        cena=1000, client_email="c@example.com", therapist_email="t@example.com",
+    )
+    main_api.send_session_email_to_group(
+        action="updated", grupa_naziv=_EVIL, pocetak=start, kraj=start + timedelta(hours=1), cena=1000,
+        client_emails=[{"name": _EVIL, "email": "m@example.com"}], therapist_email="t@example.com",
+    )
+    main_api.send_therapist_invite_email("i@example.com", _EVIL, 'https://x.example/?a=1&b="2"')
+
+    assert len(sent) == 5
+    for payload in sent:
+        assert "<img" not in payload["html"]
+        assert "evil.example\">" not in payload["html"]
+    assert 'href="https://x.example/?a=1&amp;b=&quot;2&quot;"' in sent[-1]["html"]
