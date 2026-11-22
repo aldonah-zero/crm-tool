@@ -298,7 +298,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       email,
       password,
       options: {
-        data: { full_name: fullName },
+        // practice_name is read back by /auth/login-profile on the first
+        // login after email confirmation, when the profile gets created.
+        data: { full_name: fullName, practice_name: practiceName },
       },
     });
 
@@ -309,15 +311,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       return { error: "Nalog sa ovim emailom već postoji." };
     }
 
+    // No session until the email is confirmed - the backend only creates
+    // profiles for a verified login, so that happens on first sign-in.
     if (!data.session) {
-      try {
-        await createOrJoinProfile(data.user.id, email, fullName, practiceName);
-      } catch (err: any) {
-        console.error("Error creating profile:", err);
-      }
       return { error: "EMAIL_CONFIRMATION_NEEDED" };
     }
 
+    applyAuthTokenToAxios(data.session.access_token);
     try {
       const createdProfile = await createOrJoinProfile(
         data.user.id,
@@ -349,6 +349,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     if (error) return { error: error.message };
     if (!data.user) return { error: "Prijava neuspešna" };
 
+    // The backend identifies the account from this token, not the body.
+    applyAuthTokenToAxios(data.session?.access_token);
     const p = await fetchProfile(data.user);
 
     if (!p) {

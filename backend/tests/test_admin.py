@@ -22,6 +22,8 @@ os.environ.pop("SUPABASE_URL", None)  # keep the JWKS client unconfigured by def
 os.environ.setdefault("DATABASE_URL", "sqlite:///./tests/_test_admin.db")
 os.environ["ADMIN_FREE_SESSIONS_COUNT"] = "4"
 os.environ["INTERNAL_CRON_SECRET"] = "test-internal-secret-for-pytest"
+os.environ["INVITE_SECRET"] = "test-invite-secret-for-pytest"
+os.environ["ADMIN_SECRET"] = "test-admin-secret-for-pytest"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -726,65 +728,27 @@ def test_reminder_dry_run_reports_without_sending_or_marking(seeded):
 
 
 # --------------------------------------------------------------------------
-# Public "Find a Therapist" booking now sends an admin intake request
-# instead of auto-booking a session with an auto-matched therapist
+# Public "Find a Therapist": only the intake request exists - the old
+# matching/self-booking endpoints are gone
 # --------------------------------------------------------------------------
 
-def test_public_booking_sends_intake_email_without_auto_creating_session(monkeypatch):
+def test_old_public_matching_and_booking_endpoints_are_removed(seeded):
+    tenant_id = seeded["other_tenant_id"]
+    assert client.get("/public/therapists").status_code == 404
+    assert client.get("/public/therapists", params={"tags": "anksioznost"}).status_code == 404
+    assert client.get(f"/public/therapists/{tenant_id}/availability").status_code == 404
+    resp = client.post(f"/public/therapists/{tenant_id}/book", json={
+        "ime": "A", "prezime": "B", "email": "book@example.com",
+        "pocetak": "2030-01-01T10:00:00", "kraj": "2030-01-01T11:00:00",
+    })
+    assert resp.status_code == 404
+
     db = SessionLocal()
     try:
-        tenant = Tenant(
-            name="Public Intake Tenant",
-            trial_ends_at=datetime.utcnow() + timedelta(days=30),
-            working_hours=json.dumps(
-                {str(i): {"active": True, "start": "09:00", "end": "17:00"} for i in range(7)}
-            ),
-        )
-        db.add(tenant)
-        db.commit()
-        tenant_id = tenant.id
+        assert db.query(Klijent).filter(Klijent.email == "book@example.com").first() is None
     finally:
         db.close()
 
-    avail = client.get(f"/public/therapists/{tenant_id}/availability")
-    assert avail.status_code == 200
-    slots = avail.json()["slots"]
-    assert len(slots) > 0
-    slot = slots[0]
-
-    sent_emails = []
-    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent_emails.append(payload))
-
-    resp = client.post(
-        f"/public/therapists/{tenant_id}/book",
-        json={
-            "ime": "Public", "prezime": "Klijent", "email": "public-intake@example.com",
-            "telefon": None, "napomena": "Trazim pomoc", "pocetak": slot["start"], "kraj": slot["end"],
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "sesija_id" not in body
-    assert body["tenant_name"] == "Public Intake Tenant"
-
-    db2 = SessionLocal()
-    try:
-        new_client = db2.query(Klijent).filter(
-            Klijent.tenant_id == tenant_id, Klijent.email == "public-intake@example.com"
-        ).first()
-        assert new_client is not None
-        assert new_client.therapist_id is None  # no auto-assignment anymore
-        assert db2.query(Sesija).filter(Sesija.tenant_id == tenant_id).count() == 0  # no auto-booked session
-    finally:
-        db2.close()
-
-    assert len(sent_emails) == 1
-    assert sent_emails[0]["to"] == [main_api.PUBLIC_INTAKE_NOTIFY_EMAIL]
-
-
-# --------------------------------------------------------------------------
-# Simplified public intake (no more therapist matching/self-booking)
-# --------------------------------------------------------------------------
 
 def test_public_intake_request_creates_unassigned_client_and_emails_admin(monkeypatch):
     sent_emails = []
@@ -844,10 +808,8 @@ def test_new_registrations_default_to_unapproved(seeded):
     so the frontend can gate access before an admin approves them."""
     resp = client.post(
         "/auth/register-profile",
-        json={
-            "supabase_user_id": "brand-new-sub", "email": "brand-new@example.com",
-            "full_name": "Brand New", "practice_name": "Brand New Practice",
-        },
+        json={"full_name": "Brand New", "practice_name": "Brand New Practice"},
+        headers=_client_token_headers("brand-new-sub", "brand-new@example.com"),
     )
     assert resp.status_code == 200
     assert resp.json()["is_approved"] is False
@@ -1157,3 +1119,266 @@ def test_client_portal_uses_verified_login_not_headers_or_body(seeded):
     # Without a login, a spoofed X-Client-ID gets nothing.
     assert client.get("/client/appointments", headers={"X-Client-ID": str(profile.json()["client_id"])}).status_code == 401
     assert client.get("/client/appointments", headers=headers).status_code == 200
+
+
+# --------------------------------------------------------------------------
+# /auth/* - the account identity comes only from the verified login token,
+# never from supabase_user_id/email in the request body.
+# --------------------------------------------------------------------------
+
+def _profile_row(supabase_user_id: str):
+    db = SessionLocal()
+    try:
+        return db.query(UserProfile).filter(UserProfile.supabase_user_id == supabase_user_id).first()
+    finally:
+        db.close()
+
+
+def test_auth_endpoints_reject_requests_without_login(seeded):
+    assert client.post("/auth/register-profile", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com", "practice_name": "X",
+    }).status_code == 401
+    assert client.post("/auth/login-profile", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com",
+    }).status_code == 401
+    token = main_api.create_invite_token(seeded["tenant_id"])
+    assert client.post("/auth/join-tenant", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com", "invite_token": token,
+    }).status_code == 401
+
+
+def test_login_profile_ignores_foreign_uuid_in_body(seeded):
+    """An attacker logged in as themselves puts the admin's UUID in the
+    body - they must get their OWN profile, never the admin's."""
+    resp = client.post(
+        "/auth/login-profile",
+        json={"supabase_user_id": "owner-sub", "email": "owner@example.com"},
+        headers=_client_token_headers("attacker-login-sub", "attacker-login@example.com"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["supabase_user_id"] == "attacker-login-sub"
+    assert body["email"] == "attacker-login@example.com"
+    assert body["tenant_id"] != seeded["tenant_id"]
+    assert body["is_admin"] is False
+
+
+def test_register_profile_ignores_foreign_uuid_in_body(seeded):
+    """Pre-registering a profile under a victim's UUID must not work - the
+    profile is created for the token's account instead."""
+    resp = client.post(
+        "/auth/register-profile",
+        json={"supabase_user_id": "victim-not-yet-registered", "email": "victim@example.com",
+              "practice_name": "Squatted Practice"},
+        headers=_client_token_headers("attacker-register-sub", "attacker-register@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-register-sub"
+    assert resp.json()["email"] == "attacker-register@example.com"
+    assert _profile_row("victim-not-yet-registered") is None
+
+    # And an existing user's UUID in the body doesn't return their profile either.
+    resp = client.post(
+        "/auth/register-profile",
+        json={"supabase_user_id": "owner-sub", "email": "owner@example.com", "practice_name": "X"},
+        headers=_client_token_headers("attacker-register-sub", "attacker-register@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-register-sub"
+    assert resp.json()["email"] != "owner@example.com"
+
+
+def test_join_tenant_ignores_foreign_uuid_in_body(seeded):
+    token = main_api.create_invite_token(seeded["tenant_id"])
+    resp = client.post(
+        "/auth/join-tenant",
+        json={"supabase_user_id": "victim-join-sub", "email": "victim-join@example.com", "invite_token": token},
+        headers=_client_token_headers("attacker-join-sub", "attacker-join@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-join-sub"
+    assert resp.json()["email"] == "attacker-join@example.com"
+    assert resp.json()["role"] == "member"
+    assert resp.json()["is_approved"] is False
+    assert _profile_row("victim-join-sub") is None
+
+
+def test_login_profile_uses_practice_name_from_signup_metadata(seeded):
+    """Signups that needed email confirmation have no session at signup
+    time, so the practice name is carried in the account's metadata."""
+    payload = {
+        "sub": "metadata-signup-sub", "email": "metadata-signup@example.com",
+        "aud": "authenticated", "role": "authenticated",
+        "user_metadata": {"full_name": "Meta Person", "practice_name": "Meta Practice"},
+        "exp": datetime.utcnow() + timedelta(hours=1),
+    }
+    headers = {"Authorization": f"Bearer {jwt.encode(payload, SECRET, algorithm='HS256')}"}
+    resp = client.post("/auth/login-profile", json={}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["tenant_name"] == "Meta Practice"
+    assert resp.json()["full_name"] == "Meta Person"
+
+
+# --------------------------------------------------------------------------
+# Required secrets - no defaults, the app must refuse to start without them
+# --------------------------------------------------------------------------
+
+import subprocess
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.mark.parametrize("missing", ["INVITE_SECRET", "INTERNAL_CRON_SECRET", "ADMIN_SECRET"])
+def test_app_refuses_to_start_without_required_secret(missing, tmp_path):
+    env = dict(os.environ)
+    env["DATABASE_URL"] = f"sqlite:///{(tmp_path / 'startup.db').as_posix()}"
+    env.pop(missing, None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import main_api"],
+        cwd=_BACKEND_DIR, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0
+    assert missing in result.stderr
+
+
+def test_blank_secret_is_treated_as_missing(tmp_path):
+    env = dict(os.environ)
+    env["DATABASE_URL"] = f"sqlite:///{(tmp_path / 'startup.db').as_posix()}"
+    env["INVITE_SECRET"] = "   "
+    result = subprocess.run(
+        [sys.executable, "-c", "import main_api"],
+        cwd=_BACKEND_DIR, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0
+    assert "INVITE_SECRET" in result.stderr
+
+
+def test_mark_subscription_paid_requires_correct_admin_secret(seeded):
+    url = "/internal/mark-subscription-paid"
+    body = {"tenant_id": seeded["other_tenant_id"], "months": 1}
+    assert client.post(url, json=body).status_code == 401
+    assert client.post(url, json=body, headers={"X-Admin-Secret": "wrong"}).status_code == 401
+    ok = client.post(url, json=body, headers={"X-Admin-Secret": os.environ["ADMIN_SECRET"]})
+    assert ok.status_code == 200
+    assert ok.json()["subscription_paid_until"]
+
+
+# --------------------------------------------------------------------------
+# Email HTML escaping - user input must never become markup in an email
+# --------------------------------------------------------------------------
+
+_EVIL = '<img src=x onerror="alert(1)"><a href="https://evil.example">klik</a>'
+
+
+def test_public_intake_email_escapes_user_input(monkeypatch):
+    sent_emails = []
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent_emails.append(payload))
+
+    resp = client.post("/public/intake-request", json={
+        "ime": "<b>Ime</b>", "prezime": _EVIL, "email": "escape-test@example.com",
+        "telefon": "<script>x</script>", "tags": ["<i>tag</i>"], "opis": _EVIL,
+    })
+    assert resp.status_code == 200
+
+    html_body = sent_emails[0]["html"]
+    for raw in ("<b>Ime</b>", "<img", "<a href=\"https://evil", "<script>", "<i>tag</i>"):
+        assert raw not in html_body
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in html_body
+    assert "&lt;b&gt;Ime&lt;/b&gt;" in html_body
+    assert "&lt;i&gt;tag&lt;/i&gt;" in html_body
+
+
+def test_session_email_escapes_client_and_group_names(monkeypatch):
+    sent = []
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: sent.append(payload))
+    start = datetime(2026, 5, 4, 10, 0)
+
+    main_api.send_session_email(
+        action="created", client_name=_EVIL, pocetak=start, kraj=start + timedelta(hours=1),
+        cena=1000, client_email="c@example.com", therapist_email="t@example.com",
+    )
+    main_api.send_session_email_to_group(
+        action="updated", grupa_naziv=_EVIL, pocetak=start, kraj=start + timedelta(hours=1), cena=1000,
+        client_emails=[{"name": _EVIL, "email": "m@example.com"}], therapist_email="t@example.com",
+    )
+    main_api.send_therapist_invite_email("i@example.com", _EVIL, 'https://x.example/?a=1&b="2"')
+
+    assert len(sent) == 5
+    for payload in sent:
+        assert "<img" not in payload["html"]
+        assert "evil.example\">" not in payload["html"]
+    assert 'href="https://x.example/?a=1&amp;b=&quot;2&quot;"' in sent[-1]["html"]
+
+
+# --------------------------------------------------------------------------
+# Rate limiting on the public intake form
+# --------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_intake_rate_limits():
+    """Every test starts with fresh counters, so tests that post to the
+    intake form don't eat each other's quota."""
+    main_api._intake_ip_limiter.reset()
+    main_api._intake_email_limiter.reset()
+    yield
+    main_api._intake_ip_limiter.reset()
+    main_api._intake_email_limiter.reset()
+
+
+def _intake_body(email: str) -> dict:
+    return {"ime": "Rate", "prezime": "Limit", "email": email, "tags": ["Anksioznost"]}
+
+
+def test_intake_request_is_rate_limited_per_ip(monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    headers = {"X-Forwarded-For": "203.0.113.10"}
+    limit = main_api.INTAKE_RATE_LIMIT_PER_IP
+
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body(f"ip-{i}@example.com"),
+                           headers=headers).status_code == 200
+
+    blocked = client.post("/public/intake-request", json=_intake_body("ip-extra@example.com"), headers=headers)
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) > 0
+
+    # Invalid submissions count too - they're the cheapest spam.
+    assert client.post("/public/intake-request", json={"ime": "", "prezime": "", "email": "", "tags": []},
+                       headers=headers).status_code == 429
+
+    # A different client IP is unaffected.
+    assert client.post("/public/intake-request", json=_intake_body("ip-other@example.com"),
+                       headers={"X-Forwarded-For": "203.0.113.11"}).status_code == 200
+
+
+def test_intake_rate_limit_cannot_be_dodged_by_faking_forwarded_for(monkeypatch):
+    """Only the entry added by the trusted proxy (rightmost) counts - a
+    caller prepending random IPs still hits the same bucket."""
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    limit = main_api.INTAKE_RATE_LIMIT_PER_IP
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body(f"fake-{i}@example.com"),
+                           headers={"X-Forwarded-For": f"10.0.0.{i}, 198.51.100.7"}).status_code == 200
+    assert client.post("/public/intake-request", json=_intake_body("fake-x@example.com"),
+                       headers={"X-Forwarded-For": "10.9.9.9, 198.51.100.7"}).status_code == 429
+
+
+def test_intake_request_is_rate_limited_per_email(monkeypatch):
+    monkeypatch.setattr(main_api.resend.Emails, "send", lambda payload: None)
+    limit = main_api.INTAKE_RATE_LIMIT_PER_EMAIL
+    for i in range(limit):
+        assert client.post("/public/intake-request", json=_intake_body("Same@Example.com"),
+                           headers={"X-Forwarded-For": f"192.0.2.{i}"}).status_code == 200
+    assert client.post("/public/intake-request", json=_intake_body("same@example.com"),
+                       headers={"X-Forwarded-For": "192.0.2.200"}).status_code == 429
+
+
+def test_sliding_window_limiter_allows_again_after_window(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(main_api.time_module, "monotonic", lambda: clock[0])
+    limiter = main_api.SlidingWindowRateLimiter(limit=2, window_seconds=60)
+    assert limiter.hit("k") is None
+    assert limiter.hit("k") is None
+    assert limiter.hit("k") == 61
+    clock[0] += 61
+    assert limiter.hit("k") is None

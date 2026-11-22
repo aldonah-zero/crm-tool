@@ -4,7 +4,8 @@ import time as time_module
 import hmac, hashlib, base64
 import logging
 from datetime import datetime, timedelta, time as dt_time, date
-from collections import Counter
+from collections import Counter, deque
+import threading
 from fastapi import Depends, FastAPI, HTTPException, Request, status, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -27,19 +28,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 import resend
 import os
+from html import escape as _esc  # every user-supplied value in an email's HTML goes through this
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-# Secret used to sign team-invite tokens (set INVITE_SECRET in production envs)
-INVITE_SECRET = os.getenv("INVITE_SECRET", "dev-insecure-invite-secret-change-me")
+def _require_secret(name: str) -> str:
+    """Secrets have no fallback value: a missing one would silently mean
+    forgeable invite links or an open internal endpoint, so the app
+    refuses to start instead."""
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        raise RuntimeError(
+            f"Required environment variable {name} is not set - refusing to start. "
+            f"Set it to a long random value (e.g. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`)."
+        )
+    return value
+
+
+# Secret used to sign team-invite tokens.
+INVITE_SECRET = _require_secret("INVITE_SECRET")
 INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 3600  # invite links are valid for 7 days
 
 # Shared secret the external reminder cron (see .github/workflows) must send
-# as X-Internal-Secret to trigger /internal/send-reminders. Unset in prod = disabled.
-INTERNAL_CRON_SECRET = os.getenv("INTERNAL_CRON_SECRET")
+# as X-Internal-Secret to trigger /internal/send-reminders. Must match the
+# REMINDER_CRON_SECRET GitHub Actions secret.
+INTERNAL_CRON_SECRET = _require_secret("INTERNAL_CRON_SECRET")
+
+# Secret for administrative billing actions (marking a tenant as paid),
+# sent as X-Admin-Secret to /internal/mark-subscription-paid.
+ADMIN_SECRET = _require_secret("ADMIN_SECRET")
+
+
+def _secret_matches(provided: Optional[str], expected: str) -> bool:
+    return bool(provided) and hmac.compare_digest(provided.encode(), expected.encode())
 
 # Where public "Find a Therapist" booking requests get emailed for manual
-# review/assignment (see public_book_session below).
+# review/assignment (see public_intake_request below).
 PUBLIC_INTAKE_NOTIFY_EMAIL = os.getenv("PUBLIC_INTAKE_NOTIFY_EMAIL", "czmzns@gmail.com")
 
 ############################################
@@ -405,7 +429,7 @@ def send_session_email(action, client_name, pocetak, kraj, cena, client_email=No
 
 <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Individualna sesija</div>
 <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
-<div style="font-size:14px;color:#555;margin-bottom:16px;">{client_name} · {cena:,.2f} RSD</div>
+<div style="font-size:14px;color:#555;margin-bottom:16px;">{_esc(client_name)} · {cena:,.2f} RSD</div>
 
 <div style="border-top:1.5px dashed #d1d5db;margin:0 0 16px;"></div>
 
@@ -447,7 +471,7 @@ Hvala vam što ste odabrali <strong style="color:#6b7280;">PsihApp</strong>.
 
     <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
     <div style="font-size:22px;margin-bottom:8px;">✅ Potvrda zakazane sesije</div>
-    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{client_name}</strong>,</div>
+    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(client_name)}</strong>,</div>
     <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Vaša sesija je uspešno zakazana.</div>
     </div>
 
@@ -522,7 +546,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
 
 <div style="font-size:15px;color:#333;margin-bottom:14px;">📅 <strong>{format_date_long(pocetak)}</strong></div>
 
-<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {grupa_naziv}</div>
+<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {_esc(grupa_naziv)}</div>
 <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
 <div style="font-size:14px;color:#555;margin-bottom:16px;">{cena:,.2f} RSD</div>
 
@@ -564,7 +588,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
 
     <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
     <div style="font-size:22px;margin-bottom:8px;">{c['icon']} {c['title']}</div>
-    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{member_name}</strong>,</div>
+    <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(member_name)}</strong>,</div>
     <div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">{c['greeting']}</div>
     </div>
 
@@ -572,7 +596,7 @@ def send_session_email_to_group(action, grupa_naziv, pocetak, kraj, cena, client
     <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
 
     <div style="font-size:15px;color:#333;margin-bottom:14px;">📅 <strong>{format_date_long(pocetak)}</strong></div>
-    <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {grupa_naziv}</div>
+    <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px;">Grupna sesija — {_esc(grupa_naziv)}</div>
     <div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(pocetak)} – {format_time(kraj)}</div>
 
     <div style="border-top:1.5px dashed #d1d5db;margin:16px 0;"></div>
@@ -675,7 +699,8 @@ async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.detail if isinstance(exc.detail, str) else "HTTP Error", "message": exc.detail, "detail": f"HTTP {exc.status_code} error occurred"}
+        content={"error": exc.detail if isinstance(exc.detail, str) else "HTTP Error", "message": exc.detail, "detail": f"HTTP {exc.status_code} error occurred"},
+        headers=getattr(exc, "headers", None),  # e.g. Retry-After on 429
     )
 
 
@@ -702,9 +727,6 @@ SUBSCRIPTION_PRICE_RSD = int(os.getenv("SUBSCRIPTION_PRICE_RSD", "1500"))
 SUBSCRIPTION_BANK_ACCOUNT = os.getenv("SUBSCRIPTION_BANK_ACCOUNT", "")
 SUBSCRIPTION_BANK_RECIPIENT = os.getenv("SUBSCRIPTION_BANK_RECIPIENT", "PsihoApp")
 
-# Secret for administrative billing actions (marking a tenant as paid).
-# Set ADMIN_SECRET in production; unset = the endpoint always 401s.
-ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 
 
 def has_active_subscription(tenant: "Tenant", now: datetime | None = None) -> bool:
@@ -928,7 +950,7 @@ def mark_subscription_paid(
     """Manually called by the app owner after confirming a bank transfer
     arrived. Extends from whichever is later - now, or the tenant's current
     paid-until date - so renewing early doesn't lose the remaining days."""
-    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
+    if not _secret_matches(x_admin_secret, ADMIN_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
@@ -3121,64 +3143,9 @@ def list_klijent_sesije(
 
 ############################################
 #
-#   Client-Facing Matching & Public Booking
+#   Tenant settings (profile shown to clients)
 #
 ############################################
-
-SLOT_MINUTES = 60
-
-
-def compute_available_slots(tenant_id: int, database: Session, days: int = 14):
-    """Working hours minus already-booked sessions, as 1-hour blocks for the
-    next `days` days. Naive local datetimes throughout, consistent with how
-    Sesija.pocetak/kraj are already stored and used elsewhere in this app."""
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant or not tenant.working_hours:
-        return []
-
-    try:
-        hours_by_weekday = json.loads(tenant.working_hours)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    now = datetime.utcnow()
-    range_end = now + timedelta(days=days)
-
-    existing_sessions = database.query(Sesija).filter(
-        Sesija.tenant_id == tenant_id,
-        Sesija.status != "otkazano",
-        Sesija.kraj >= now,
-        Sesija.pocetak <= range_end,
-    ).all()
-    booked_ranges = [(s.pocetak, s.kraj) for s in existing_sessions]
-
-    def overlaps(start, end):
-        return any(start < b_end and end > b_start for b_start, b_end in booked_ranges)
-
-    slots = []
-    for i in range(days):
-        day = (now + timedelta(days=i)).date()
-        config = hours_by_weekday.get(str(day.weekday()))
-        if not config or not config.get("active"):
-            continue
-        try:
-            start_h, start_m = (int(x) for x in config["start"].split(":"))
-            end_h, end_m = (int(x) for x in config["end"].split(":"))
-        except (KeyError, ValueError, AttributeError):
-            continue
-
-        cursor = datetime.combine(day, dt_time(start_h, start_m))
-        day_end = datetime.combine(day, dt_time(end_h, end_m))
-
-        while cursor + timedelta(minutes=SLOT_MINUTES) <= day_end:
-            slot_end = cursor + timedelta(minutes=SLOT_MINUTES)
-            if cursor > now and not overlaps(cursor, slot_end):
-                slots.append({"start": cursor, "end": slot_end})
-            cursor = slot_end
-
-    slots.sort(key=lambda s: s["start"])
-    return slots
-
 
 MAX_PHOTO_DATA_URL_LENGTH = 2_000_000  # ~1.4MB decoded - plenty for a resized avatar
 
@@ -3257,79 +3224,16 @@ def get_owner_name(tenant_id: int, database: Session) -> str:
     return ""
 
 
-@app.get("/public/therapists", tags=["Public"])
-def public_search_therapists(
-        tags: str = "",
-        database: Session = Depends(get_db)
-):
-    """Cross-tenant client-facing search. No tenant header - same public,
-    read-only trust model as /auth/invite-info."""
-    requested = {t.strip() for t in tags.split(",") if t.strip()}
-
-    tenants = database.query(Tenant).filter(
-        Tenant.specialties.isnot(None), Tenant.specialties != ""
-    ).all()
-
-    results = []
-    for tenant in tenants:
-        tenant_tags = {t.strip() for t in tenant.specialties.split(",") if t.strip()}
-        matched = (tenant_tags & requested) if requested else tenant_tags
-        if requested and not matched:
-            continue
-
-        slots = compute_available_slots(tenant.id, database)
-        if not slots:
-            continue
-
-        results.append({
-            "tenant_id": tenant.id,
-            "name": tenant.name,
-            "therapist_name": get_owner_name(tenant.id, database) or tenant.name,
-            "photo_url": tenant.photo_url,
-            "specialties": sorted(tenant_tags),
-            "matched_tags": sorted(matched),
-            "match_count": len(matched),
-            "next_available": slots[0]["start"].isoformat(),
-        })
-
-    results.sort(key=lambda r: (-r["match_count"], r["next_available"]))
-    return results
-
-
-@app.get("/public/therapists/{tenant_id}/availability", tags=["Public"])
-def public_therapist_availability(
-        tenant_id: int,
-        days: int = 14,
-        database: Session = Depends(get_db)
-):
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    slots = compute_available_slots(tenant_id, database, days=min(days, 30))
-    return {
-        "tenant_id": tenant.id,
-        "name": tenant.name,
-        "therapist_name": get_owner_name(tenant_id, database) or tenant.name,
-        "photo_url": tenant.photo_url,
-        "slots": [
-            {"start": s["start"].isoformat(), "end": s["end"].isoformat()}
-            for s in slots
-        ],
-    }
-
-
 ############################################
 #
-#   Public support-request intake (current flow)
+#   Public support-request intake
 #
-#   Per product decision, the public "Find a Therapist" page no longer
-#   matches/lists therapists or lets a client pick a specific slot - it
-#   just collects what's troubling them (categories + a free-text
-#   description) plus contact info, and an admin manually assigns a
-#   therapist afterward. Everything below public_search_therapists is the
-#   PREVIOUS therapist-matching/self-booking flow, kept but no longer
-#   wired to the frontend (see the comment near public_book_session).
+#   The public "Find a Therapist" page doesn't list therapists or let a
+#   client pick a slot - it collects what's troubling them (categories +
+#   a free-text description) plus contact info, and an admin manually
+#   assigns a therapist afterward. (The old matching/self-booking
+#   endpoints /public/therapists, .../availability and .../book were
+#   removed - they were unauthenticated and no longer used.)
 #
 ############################################
 
@@ -3370,7 +3274,7 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
     wrapped try/except."""
     tags_label = ", ".join(data.tags) if data.tags else "—"
     opis_row = (
-        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Opis situacije:</strong> {data.opis}</div>'
+        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Opis situacije:</strong> {_esc(data.opis)}</div>'
         if data.opis else ""
     )
     html = f"""
@@ -3382,9 +3286,9 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{klijent.ime} {klijent.prezime}</div>
-<div style="font-size:14px;color:#555;">{klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
-<div style="font-size:14px;color:#555;margin-top:10px;">🏷️ Oblasti: {tags_label}</div>
+<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{_esc(klijent.ime)} {_esc(klijent.prezime)}</div>
+<div style="font-size:14px;color:#555;">{_esc(klijent.email or "")}{" · " + _esc(klijent.broj_telefona) if klijent.broj_telefona else ""}</div>
+<div style="font-size:14px;color:#555;margin-top:10px;">🏷️ Oblasti: {_esc(tags_label)}</div>
 {opis_row}
 </div>
 </div>
@@ -3405,11 +3309,88 @@ def send_public_support_request_email(klijent: "Klijent", data: "PublicIntakeReq
         logger.error(f"Failed to send public support-request email: {e}")
 
 
+class SlidingWindowRateLimiter:
+    """In-memory sliding-window limiter: at most `limit` hits per key
+    within `window_seconds`. State lives in this process only - fine for
+    the single Render instance; with several workers/instances each one
+    counts separately (move to Redis or similar at that point)."""
+
+    def __init__(self, limit: int, window_seconds: int):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> Optional[int]:
+        """Records a hit. Returns None if allowed, otherwise the number of
+        seconds until the next hit would be allowed."""
+        now = time_module.monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            hits = self._hits.setdefault(key, deque())
+            while hits and hits[0] <= cutoff:
+                hits.popleft()
+            if len(hits) >= self.limit:
+                return max(1, int(hits[0] + self.window_seconds - now) + 1)
+            hits.append(now)
+            # Keep memory bounded: occasionally drop keys with no recent hits.
+            if len(self._hits) > 10_000:
+                for k in [k for k, v in self._hits.items() if not v or v[-1] <= cutoff]:
+                    del self._hits[k]
+            return None
+
+    def reset(self):
+        with self._lock:
+            self._hits.clear()
+
+
+# Public intake form: per client IP, plus per submitted email address (so
+# one address can't be flooded from many IPs). Both configurable.
+INTAKE_RATE_LIMIT_PER_IP = int(os.getenv("INTAKE_RATE_LIMIT_PER_IP", "5"))
+INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS = int(os.getenv("INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS", "600"))
+INTAKE_RATE_LIMIT_PER_EMAIL = int(os.getenv("INTAKE_RATE_LIMIT_PER_EMAIL", "3"))
+INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS = int(os.getenv("INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS", "3600"))
+# How many reverse proxies sit in front of the app and append to
+# X-Forwarded-For (Render's load balancer = 1). The client IP is taken
+# that many entries from the RIGHT, because the left part of the header
+# is whatever the caller sent and can be faked.
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+
+_intake_ip_limiter = SlidingWindowRateLimiter(INTAKE_RATE_LIMIT_PER_IP, INTAKE_RATE_LIMIT_IP_WINDOW_SECONDS)
+_intake_email_limiter = SlidingWindowRateLimiter(INTAKE_RATE_LIMIT_PER_EMAIL, INTAKE_RATE_LIMIT_EMAIL_WINDOW_SECONDS)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    if TRUSTED_PROXY_HOPS > 0 and forwarded:
+        return forwarded[-min(TRUSTED_PROXY_HOPS, len(forwarded))]
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limited(retry_after: int):
+    raise HTTPException(
+        status_code=429,
+        detail="Previše zahteva. Pokušajte ponovo malo kasnije.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 @app.post("/public/intake-request", tags=["Public"])
 def public_intake_request(
         data: PublicIntakeRequest,
+        request: Request,
         database: Session = Depends(get_db),
 ):
+    # Counted before validation on purpose - invalid submissions are spam too.
+    retry_after = _intake_ip_limiter.hit(_client_ip(request))
+    if retry_after:
+        _rate_limited(retry_after)
+    email_key = (data.email or "").strip().lower()
+    if email_key:
+        retry_after = _intake_email_limiter.hit(email_key)
+        if retry_after:
+            _rate_limited(retry_after)
+
     if not data.ime.strip() or not data.prezime.strip() or not data.email.strip():
         raise HTTPException(status_code=400, detail="Ime, prezime i email su obavezni")
     if not data.tags and not (data.opis and data.opis.strip()):
@@ -3438,207 +3419,6 @@ def public_intake_request(
     return {"klijent_ime": f"{klijent.ime} {klijent.prezime}"}
 
 
-class PublicBookingRequest(BaseModel):
-    ime: str
-    prezime: str
-    email: str
-    telefon: str | None = None
-    napomena: str | None = None
-    pocetak: datetime
-    kraj: datetime
-
-
-def send_public_booking_emails(tenant_name, therapist_emails, klijent, sesija, napomena):
-    """Best-effort notification emails for an online booking - a failure
-    here must never block the booking itself, which is why every send is
-    wrapped and only logged on error."""
-    klijent_ime = f"{klijent.ime} {klijent.prezime}"
-
-    try:
-        client_html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">✅ Termin je zakazan</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
-<div style="font-size:15px;color:#1a1a1a;">Vaš termin kod <strong>{tenant_name}</strong> je uspešno zakazan.</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
-<div style="font-size:15px;font-weight:600;color:#111;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
-</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:20px 24px;margin-bottom:8px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:13px;color:#777;line-height:1.5;"><strong>Pravila otkazivanja</strong><br>Termin se može otkazati najkasnije <strong>24 sata</strong> unapred.</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-Hvala vam na poverenju. <strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": [klijent.email],
-            "subject": f"✅ Potvrda termina - {format_date_long(sesija.pocetak)}",
-            "html": client_html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send booking confirmation to client: {e}")
-
-    if not therapist_emails:
-        return
-
-    try:
-        napomena_row = (
-            f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Napomena klijenta:</strong> {napomena}</div>'
-            if napomena else ""
-        )
-        therapist_html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">🔔 Novi termin zakazan online</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent <strong>{klijent_ime}</strong> je preko "Pronađi terapeuta" zakazao termin.</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;color:#333;margin-bottom:10px;">📅 <strong>{format_date_long(sesija.pocetak)}</strong></div>
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:4px;">{format_time(sesija.pocetak)} – {format_time(sesija.kraj)}</div>
-<div style="font-size:14px;color:#555;">{klijent_ime} · {klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
-{napomena_row}
-</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-<strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": therapist_emails,
-            "subject": f"🔔 Novo zakazivanje - {klijent_ime}",
-            "html": therapist_html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send booking notification to therapist: {e}")
-
-
-def send_public_intake_request_email(tenant: "Tenant", klijent: "Klijent", data: "PublicBookingRequest"):
-    """A client submitted a request through the public 'Find a Therapist'
-    flow - notifies the center admin so a person assigns the client to
-    the appropriate therapist, rather than the system auto-booking a
-    confirmed session with whichever therapist happened to be matched."""
-    napomena_row = (
-        f'<div style="font-size:14px;color:#555;margin-top:12px;"><strong>Poruka klijenta:</strong> {data.napomena}</div>'
-        if data.napomena else ""
-    )
-    html = f"""
-<div style="background:#f2f2f7;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;color:#1a1a1a;">
-<div style="max-width:520px;margin:auto;">
-<div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="font-size:22px;margin-bottom:8px;">📩 Novi zahtev klijenta</div>
-<div style="font-size:15px;color:#1a1a1a;">Klijent je preko stranice "Pronađi terapeuta" poslao zahtev za praksu <strong>{tenant.name}</strong>. Dodelite terapeuta ručno u Admin centru (Klijenti).</div>
-</div>
-<div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
-<div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
-<div style="font-size:15px;font-weight:600;color:#111;margin-bottom:6px;">{klijent.ime} {klijent.prezime}</div>
-<div style="font-size:14px;color:#555;">{klijent.email}{" · " + klijent.broj_telefona if klijent.broj_telefona else ""}</div>
-<div style="font-size:14px;color:#555;margin-top:10px;">📅 Traženi termin: <strong>{format_date_long(data.pocetak)}</strong>, {format_time(data.pocetak)}–{format_time(data.kraj)}</div>
-<div style="font-size:14px;color:#555;margin-top:6px;">🏷️ Kategorije prakse: {tenant.specialties or "—"}</div>
-{napomena_row}
-</div>
-</div>
-<div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
-<strong style="color:#6b7280;">PsihoApp</strong>
-</div>
-</div>
-</div>
-"""
-    try:
-        resend.Emails.send({
-            "from": "PsihoApp <noreply@hrioapp.com>",
-            "to": [PUBLIC_INTAKE_NOTIFY_EMAIL],
-            "subject": f"📩 Novi zahtev klijenta - {klijent.ime} {klijent.prezime}",
-            "html": html,
-        })
-    except Exception as e:
-        logger.error(f"Failed to send public intake request email: {e}")
-
-
-@app.post("/public/therapists/{tenant_id}/book", tags=["Public"])
-def public_book_session(
-        tenant_id: int,
-        data: PublicBookingRequest,
-        database: Session = Depends(get_db)
-):
-    tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    # Re-validate server-side - the client only saw a snapshot of availability,
-    # and this endpoint is unauthenticated so nothing about the request can be trusted.
-    available = compute_available_slots(tenant_id, database)
-    if not any(s["start"] == data.pocetak and s["end"] == data.kraj for s in available):
-        raise HTTPException(status_code=409, detail="Traženi termin više nije dostupan")
-
-    klijent = database.query(Klijent).filter(
-        Klijent.tenant_id == tenant_id, Klijent.email == data.email
-    ).first()
-    if not klijent:
-        klijent = Klijent(
-            tenant_id=tenant_id,
-            ime=data.ime,
-            prezime=data.prezime,
-            email=data.email,
-            broj_telefona=data.telefon or "",
-        )
-        database.add(klijent)
-        database.flush()
-
-    # Disabled per product decision: the system no longer auto-books a
-    # confirmed session with an automatically-matched therapist. An admin
-    # now reviews each public request (emailed below) and assigns the
-    # client to the appropriate therapist manually in the admin area.
-    # Left here, commented out, in case this needs to be restored.
-    #
-    # sesija = Sesija(
-    #     tenant_id=tenant_id,
-    #     pocetak=data.pocetak,
-    #     kraj=data.kraj,
-    #     cena=tenant.default_price or 0,
-    #     status="zakazano",
-    # )
-    # database.add(sesija)
-    # database.flush()
-    #
-    # database.add(SesijaKlijent(
-    #     tenant_id=tenant_id,
-    #     klijent_id=klijent.id,
-    #     sesija_id=sesija.id,
-    # ))
-    #
-    # therapist_emails = [
-    #     p.email for p in
-    #     database.query(UserProfile).filter(UserProfile.tenant_id == tenant_id).all()
-    # ]
-    # send_public_booking_emails(tenant.name, therapist_emails, klijent, sesija, data.napomena)
-
-    database.commit()
-    database.refresh(klijent)
-
-    send_public_intake_request_email(tenant, klijent, data)
-
-    return {
-        "tenant_name": tenant.name,
-        "klijent_ime": f"{klijent.ime} {klijent.prezime}",
-        "pocetak": data.pocetak.isoformat(),
-        "kraj": data.kraj.isoformat(),
-    }
-
-
 def send_session_reminder_email(klijent, sesija, therapist_name):
     """Sends the 'day before' reminder to the client. Unlike the other
     email helpers here, this one is allowed to raise - the caller only
@@ -3651,8 +3431,8 @@ def send_session_reminder_email(klijent, sesija, therapist_name):
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">⏰ Podsetnik za sutra</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{klijent_ime}</strong>,</div>
-<div style="font-size:15px;color:#1a1a1a;">Podsećamo vas na termin kod <strong>{therapist_name}</strong> sutra.</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(klijent_ime)}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;">Podsećamo vas na termin kod <strong>{_esc(therapist_name)}</strong> sutra.</div>
 </div>
 <div style="background:#fff;border-radius:16px;padding:24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="border:1.5px dashed #d1d5db;border-radius:12px;padding:20px;">
@@ -3692,7 +3472,7 @@ def send_session_reminders(
     whether Resend is configured) without sending any email or marking
     anything as reminded - safe to call to verify the pipeline is wired
     up correctly without risking a real send to a real client."""
-    if not INTERNAL_CRON_SECRET or x_internal_secret != INTERNAL_CRON_SECRET:
+    if not _secret_matches(x_internal_secret, INTERNAL_CRON_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     now = datetime.utcnow()
@@ -3769,23 +3549,54 @@ def send_session_reminders(
 from pydantic import BaseModel as PydanticBaseModel
 
 
+# supabase_user_id/email are still accepted in these bodies so older
+# frontends keep working, but they are IGNORED - the account identity
+# always comes from the verified login token (see _verified_identity).
 class RegisterProfileRequest(PydanticBaseModel):
-    supabase_user_id: str
-    email: str
+    supabase_user_id: str | None = None
+    email: str | None = None
     full_name: str | None = None
     practice_name: str
 
 
 class LoginProfileRequest(PydanticBaseModel):
-    supabase_user_id: str
+    supabase_user_id: str | None = None
     email: str | None = None
     full_name: str | None = None
 
 class JoinTenantRequest(PydanticBaseModel):
-    supabase_user_id: str
-    email: str
+    supabase_user_id: str | None = None
+    email: str | None = None
     full_name: str | None = None
     invite_token: str
+
+
+def _verified_identity(request: Request) -> tuple[str, str, dict]:
+    """(supabase_user_id, email, user_metadata) from the verified bearer
+    token - never from the request body, which anyone can fill with
+    someone else's id. Same rule as /client-auth/profile."""
+    claims = get_verified_supabase_claims(request)
+    email = (claims.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=401, detail="Login has no email")
+    metadata = claims.get("user_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return claims["sub"], email, metadata
+
+
+def _profile_payload(profile: "UserProfile", tenant: Optional["Tenant"]) -> dict:
+    return {
+        "user_id": profile.id,
+        "supabase_user_id": profile.supabase_user_id,
+        "email": profile.email,
+        "full_name": profile.full_name,
+        "role": profile.role,
+        "is_admin": profile.is_admin,
+        "is_approved": profile.is_approved,
+        "tenant_id": profile.tenant_id,
+        "tenant_name": tenant.name if tenant else "",
+    }
 
 
 def create_invite_token(tenant_id: int) -> str:
@@ -3820,26 +3631,19 @@ def verify_invite_token(token: str) -> int:
 @app.post("/auth/register-profile", tags=["Auth"])
 def register_profile(
         data: RegisterProfileRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """After Supabase signup, create a new tenant + user_profile."""
-    existing = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
-    ).first()
+    """After Supabase signup, create a new tenant + user_profile for the
+    caller identified by the verified login token."""
+    supabase_user_id, email, metadata = _verified_identity(request)
 
+    existing = database.query(UserProfile).filter(
+        UserProfile.supabase_user_id == supabase_user_id
+    ).first()
     if existing:
         tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
-        return {
-            "user_id": existing.id,
-            "supabase_user_id": existing.supabase_user_id,
-            "email": existing.email,
-            "full_name": existing.full_name,
-            "role": existing.role,
-            "is_admin": existing.is_admin,
-            "is_approved": existing.is_approved,
-            "tenant_id": existing.tenant_id,
-            "tenant_name": tenant.name if tenant else ""
-        }
+        return _profile_payload(existing, tenant)
 
     new_tenant = Tenant(
         name=data.practice_name,
@@ -3853,9 +3657,9 @@ def register_profile(
     # UserProfile.is_admin) granted only via BOOTSTRAP_ADMIN_EMAIL or by
     # an existing admin promoting someone through the admin area.
     new_profile = UserProfile(
-        supabase_user_id=data.supabase_user_id,
-        email=data.email,
-        full_name=data.full_name,
+        supabase_user_id=supabase_user_id,
+        email=email,
+        full_name=data.full_name or metadata.get("full_name"),
         role="owner",
         tenant_id=new_tenant.id
     )
@@ -3863,39 +3667,37 @@ def register_profile(
     database.commit()
     database.refresh(new_profile)
 
-    return {
-        "user_id": new_profile.id,
-        "supabase_user_id": new_profile.supabase_user_id,
-        "email": new_profile.email,
-        "full_name": new_profile.full_name,
-        "role": new_profile.role,
-        "is_admin": new_profile.is_admin,
-        "is_approved": new_profile.is_approved,
-        "tenant_id": new_tenant.id,
-        "tenant_name": new_tenant.name
-    }
+    return _profile_payload(new_profile, new_tenant)
 
 
 @app.post("/auth/login-profile", tags=["Auth"])
 def login_profile(
         data: LoginProfileRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """After Supabase login, look up user_profile and return tenant_id."""
+    """After Supabase login, look up the caller's user_profile (identified
+    by the verified login token) and return tenant_id."""
+    supabase_user_id, email, metadata = _verified_identity(request)
+
     profile = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
+        UserProfile.supabase_user_id == supabase_user_id
     ).first()
 
     if not profile:
-        tenant = Tenant(name="Default", trial_ends_at=datetime.utcnow() + timedelta(days=30))
+        # A signup that needed email confirmation had no session yet, so
+        # the practice name was stashed in the account's metadata instead
+        # (see signUp in AuthContext.tsx).
+        practice_name = (metadata.get("practice_name") or "").strip() or "Default"
+        tenant = Tenant(name=practice_name, trial_ends_at=datetime.utcnow() + timedelta(days=30))
         database.add(tenant)
         database.flush()
 
         # See register_profile above - is_admin is never granted automatically.
         profile = UserProfile(
-            supabase_user_id=data.supabase_user_id,
-            email=data.email,
-            full_name=data.full_name,
+            supabase_user_id=supabase_user_id,
+            email=email,
+            full_name=data.full_name or metadata.get("full_name") or metadata.get("name"),
             role="owner",
             tenant_id=tenant.id
         )
@@ -3905,44 +3707,26 @@ def login_profile(
         database.refresh(profile)
     tenant = database.query(Tenant).filter(Tenant.id == profile.tenant_id).first()
 
-    return {
-        "user_id": profile.id,
-        "supabase_user_id": profile.supabase_user_id,
-        "email": profile.email,
-        "full_name": profile.full_name,
-        "role": profile.role,
-        "is_admin": profile.is_admin,
-        "is_approved": profile.is_approved,
-        "tenant_id": profile.tenant_id,
-        "tenant_name": tenant.name if tenant else ""
-    }
+    return _profile_payload(profile, tenant)
 
 
 @app.post("/auth/join-tenant", tags=["Auth"])
 def join_tenant(
         data: JoinTenantRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """New user joins an existing tenant via a signed team-invite link."""
+    """The logged-in caller (verified token) joins an existing tenant via
+    a signed team-invite link."""
+    supabase_user_id, email, metadata = _verified_identity(request)
     tenant_id = verify_invite_token(data.invite_token)
 
     existing = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
+        UserProfile.supabase_user_id == supabase_user_id
     ).first()
-
     if existing:
         tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
-        return {
-            "user_id": existing.id,
-            "supabase_user_id": existing.supabase_user_id,
-            "email": existing.email,
-            "full_name": existing.full_name,
-            "role": existing.role,
-            "is_admin": existing.is_admin,
-            "is_approved": existing.is_approved,
-            "tenant_id": existing.tenant_id,
-            "tenant_name": tenant.name if tenant else ""
-        }
+        return _profile_payload(existing, tenant)
 
     tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -3951,9 +3735,9 @@ def join_tenant(
     # Invited members are never admins by default (is_admin stays False) -
     # an existing admin has to promote them explicitly via the admin area.
     new_profile = UserProfile(
-        supabase_user_id=data.supabase_user_id,
-        email=data.email,
-        full_name=data.full_name,
+        supabase_user_id=supabase_user_id,
+        email=email,
+        full_name=data.full_name or metadata.get("full_name") or metadata.get("name"),
         role="member",
         tenant_id=tenant_id
     )
@@ -3961,17 +3745,7 @@ def join_tenant(
     database.commit()
     database.refresh(new_profile)
 
-    return {
-        "user_id": new_profile.id,
-        "supabase_user_id": new_profile.supabase_user_id,
-        "email": new_profile.email,
-        "full_name": new_profile.full_name,
-        "role": new_profile.role,
-        "is_admin": new_profile.is_admin,
-        "is_approved": new_profile.is_approved,
-        "tenant_id": new_profile.tenant_id,
-        "tenant_name": tenant.name
-    }
+    return _profile_payload(new_profile, tenant)
 
 
 @app.get("/auth/invite-link", tags=["Auth"])
@@ -4224,7 +3998,7 @@ def cancel_client_appointment(
                 "from": "PsihoApp <noreply@hrioapp.com>",
                 "to": therapist_emails,
                 "subject": f"🗑️ Klijent je otkazao termin - {klijent.ime} {klijent.prezime}",
-                "html": f"<p>{klijent.ime} {klijent.prezime} je otkazao/la termin zakazan za {format_date_long(sesija.pocetak)} u {format_time(sesija.pocetak)}.</p>",
+                "html": f"<p>{_esc(klijent.ime)} {_esc(klijent.prezime)} je otkazao/la termin zakazan za {format_date_long(sesija.pocetak)} u {format_time(sesija.pocetak)}.</p>",
             })
     except Exception as e:
         logger.error(f"Failed to send cancellation notice to therapist: {e}")
@@ -4779,7 +4553,7 @@ def send_therapist_approved_email(therapist: "UserProfile"):
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">✅ Nalog je odobren</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{name}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(name)}</strong>,</div>
 <div style="font-size:15px;color:#1a1a1a;">Vaš nalog je odobren od strane administratora. Sada možete da se prijavite (email/lozinka ili Google).</div>
 </div>
 <div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
@@ -4897,11 +4671,11 @@ def send_therapist_invite_email(email: str, full_name: Optional[str], action_lin
 <div style="max-width:520px;margin:auto;">
 <div style="background:#fff;border-radius:16px;padding:28px 24px 24px;margin-bottom:8px;box-shadow:0 1px 6px rgba(0,0,0,0.04);">
 <div style="font-size:22px;margin-bottom:8px;">👋 Dobrodošli u PsihoApp</div>
-<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{name}</strong>,</div>
+<div style="font-size:15px;color:#1a1a1a;margin-bottom:4px;">Poštovani/a <strong>{_esc(name)}</strong>,</div>
 <div style="font-size:15px;color:#1a1a1a;margin-bottom:10px;">Za Vas je otvoren nalog u PsihoApp aplikaciji. Kliknite na dugme ispod da potvrdite nalog - bićete automatski prijavljeni.</div>
 <div style="font-size:14px;color:#4b5563;margin-bottom:20px;">Ubuduće se prijavljujete samo unosom svog email-a: na stranici za prijavu kliknite „Pošalji link za prijavu“ i otvorite link iz mejla. Lozinka nije potrebna.</div>
-<a href="{action_link}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:10px;">Potvrdi nalog i prijavi se</a>
-<div style="font-size:12px;color:#9ca3af;margin-top:18px;">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br>{action_link}</div>
+<a href="{_esc(action_link)}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 22px;border-radius:10px;">Potvrdi nalog i prijavi se</a>
+<div style="font-size:12px;color:#9ca3af;margin-top:18px;">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br>{_esc(action_link)}</div>
 </div>
 <div style="text-align:center;font-size:13px;color:#9ca3af;margin-top:14px;line-height:1.5;">
 <strong style="color:#6b7280;">PsihoApp</strong>

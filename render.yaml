@@ -9,6 +9,14 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # Required - the backend refuses to start without these (set the
+      # values in the Render dashboard; sync: false keeps them out of git).
+      - key: INVITE_SECRET
+        sync: false
+      - key: INTERNAL_CRON_SECRET
+        sync: false
+      - key: ADMIN_SECRET
+        sync: false
 
   # Frontend (Free static site)
   - type: web
@@ -19,6 +27,12 @@ services:
     envVars:
       - key: VITE_API_URL
         value: https://crm-tool-backend-e885b1.onrender.com
+      # Used to come from the committed frontend/.env.production - now set
+      # these in the Render dashboard (they are baked in at build time).
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
     headers:
       - path: /assets/*.js
         name: Content-Type

@@ -1,0 +1,45 @@
+# ---- Secrets / environment ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Databases (never commit data - it may contain client records) ----
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+backend/data/
+
+# ---- Python ----
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Stray files from `pip install pkg>=1.0` run without quotes
+# (the shell treats ">=1.0" as a redirect into a file named "=1.0"/"1.0").
+backend/[0-9]*.[0-9]*
+
+# ---- Node / frontend ----
+node_modules/
+frontend/build/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
