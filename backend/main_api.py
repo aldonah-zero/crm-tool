@@ -30,13 +30,35 @@ import os
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-# Secret used to sign team-invite tokens (set INVITE_SECRET in production envs)
-INVITE_SECRET = os.getenv("INVITE_SECRET", "dev-insecure-invite-secret-change-me")
+def _require_secret(name: str) -> str:
+    """Secrets have no fallback value: a missing one would silently mean
+    forgeable invite links or an open internal endpoint, so the app
+    refuses to start instead."""
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        raise RuntimeError(
+            f"Required environment variable {name} is not set - refusing to start. "
+            f"Set it to a long random value (e.g. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`)."
+        )
+    return value
+
+
+# Secret used to sign team-invite tokens.
+INVITE_SECRET = _require_secret("INVITE_SECRET")
 INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 3600  # invite links are valid for 7 days
 
 # Shared secret the external reminder cron (see .github/workflows) must send
-# as X-Internal-Secret to trigger /internal/send-reminders. Unset in prod = disabled.
-INTERNAL_CRON_SECRET = os.getenv("INTERNAL_CRON_SECRET")
+# as X-Internal-Secret to trigger /internal/send-reminders. Must match the
+# REMINDER_CRON_SECRET GitHub Actions secret.
+INTERNAL_CRON_SECRET = _require_secret("INTERNAL_CRON_SECRET")
+
+# Secret for administrative billing actions (marking a tenant as paid),
+# sent as X-Admin-Secret to /internal/mark-subscription-paid.
+ADMIN_SECRET = _require_secret("ADMIN_SECRET")
+
+
+def _secret_matches(provided: Optional[str], expected: str) -> bool:
+    return bool(provided) and hmac.compare_digest(provided.encode(), expected.encode())
 
 # Where public "Find a Therapist" booking requests get emailed for manual
 # review/assignment (see public_book_session below).
@@ -702,9 +724,6 @@ SUBSCRIPTION_PRICE_RSD = int(os.getenv("SUBSCRIPTION_PRICE_RSD", "1500"))
 SUBSCRIPTION_BANK_ACCOUNT = os.getenv("SUBSCRIPTION_BANK_ACCOUNT", "")
 SUBSCRIPTION_BANK_RECIPIENT = os.getenv("SUBSCRIPTION_BANK_RECIPIENT", "PsihoApp")
 
-# Secret for administrative billing actions (marking a tenant as paid).
-# Set ADMIN_SECRET in production; unset = the endpoint always 401s.
-ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 
 
 def has_active_subscription(tenant: "Tenant", now: datetime | None = None) -> bool:
@@ -928,7 +947,7 @@ def mark_subscription_paid(
     """Manually called by the app owner after confirming a bank transfer
     arrived. Extends from whichever is later - now, or the tenant's current
     paid-until date - so renewing early doesn't lose the remaining days."""
-    if not ADMIN_SECRET or x_admin_secret != ADMIN_SECRET:
+    if not _secret_matches(x_admin_secret, ADMIN_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
@@ -3692,7 +3711,7 @@ def send_session_reminders(
     whether Resend is configured) without sending any email or marking
     anything as reminded - safe to call to verify the pipeline is wired
     up correctly without risking a real send to a real client."""
-    if not INTERNAL_CRON_SECRET or x_internal_secret != INTERNAL_CRON_SECRET:
+    if not _secret_matches(x_internal_secret, INTERNAL_CRON_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     now = datetime.utcnow()

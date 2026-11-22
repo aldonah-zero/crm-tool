@@ -22,6 +22,10 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:///./data/Class_Diagram.db
+      # Required - the backend refuses to start without them.
+      - INVITE_SECRET=${INVITE_SECRET:?set INVITE_SECRET}
+      - INTERNAL_CRON_SECRET=${INTERNAL_CRON_SECRET:?set INTERNAL_CRON_SECRET}
+      - ADMIN_SECRET=${ADMIN_SECRET:?set ADMIN_SECRET}
     volumes:
       - sqlite_data:/app/data
 

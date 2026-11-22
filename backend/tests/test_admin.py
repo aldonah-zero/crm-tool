@@ -22,6 +22,8 @@ os.environ.pop("SUPABASE_URL", None)  # keep the JWKS client unconfigured by def
 os.environ.setdefault("DATABASE_URL", "sqlite:///./tests/_test_admin.db")
 os.environ["ADMIN_FREE_SESSIONS_COUNT"] = "4"
 os.environ["INTERNAL_CRON_SECRET"] = "test-internal-secret-for-pytest"
+os.environ["INVITE_SECRET"] = "test-invite-secret-for-pytest"
+os.environ["ADMIN_SECRET"] = "test-admin-secret-for-pytest"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1253,3 +1255,47 @@ def test_login_profile_uses_practice_name_from_signup_metadata(seeded):
     assert resp.status_code == 200
     assert resp.json()["tenant_name"] == "Meta Practice"
     assert resp.json()["full_name"] == "Meta Person"
+
+
+# --------------------------------------------------------------------------
+# Required secrets - no defaults, the app must refuse to start without them
+# --------------------------------------------------------------------------
+
+import subprocess
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.mark.parametrize("missing", ["INVITE_SECRET", "INTERNAL_CRON_SECRET", "ADMIN_SECRET"])
+def test_app_refuses_to_start_without_required_secret(missing, tmp_path):
+    env = dict(os.environ)
+    env["DATABASE_URL"] = f"sqlite:///{(tmp_path / 'startup.db').as_posix()}"
+    env.pop(missing, None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import main_api"],
+        cwd=_BACKEND_DIR, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0
+    assert missing in result.stderr
+
+
+def test_blank_secret_is_treated_as_missing(tmp_path):
+    env = dict(os.environ)
+    env["DATABASE_URL"] = f"sqlite:///{(tmp_path / 'startup.db').as_posix()}"
+    env["INVITE_SECRET"] = "   "
+    result = subprocess.run(
+        [sys.executable, "-c", "import main_api"],
+        cwd=_BACKEND_DIR, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0
+    assert "INVITE_SECRET" in result.stderr
+
+
+def test_mark_subscription_paid_requires_correct_admin_secret(seeded):
+    url = "/internal/mark-subscription-paid"
+    body = {"tenant_id": seeded["other_tenant_id"], "months": 1}
+    assert client.post(url, json=body).status_code == 401
+    assert client.post(url, json=body, headers={"X-Admin-Secret": "wrong"}).status_code == 401
+    ok = client.post(url, json=body, headers={"X-Admin-Secret": os.environ["ADMIN_SECRET"]})
+    assert ok.status_code == 200
+    assert ok.json()["subscription_paid_until"]
