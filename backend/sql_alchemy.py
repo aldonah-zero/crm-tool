@@ -30,7 +30,9 @@ class Tenant(Base):
     created_at: Mapped[Optional[dt_datetime]] = mapped_column(DateTime, default=dt_datetime.utcnow)
 
     # Client-facing "Find a Therapist" matching
-    specialties: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated tag slugs
+    specialties: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated slugs, see therapist_profile_options.py
+    modalities: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # comma-separated psychotherapy modality slugs
+    bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # therapist's own plain-text biography
     working_hours: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON, keyed by weekday "0"-"6"
     default_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     photo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # data: URL, shown to clients

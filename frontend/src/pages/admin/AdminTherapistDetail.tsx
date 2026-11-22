@@ -24,6 +24,11 @@ interface TherapistDetail {
   sessions_rank_overall: number;
   clients: Client[];
   recent_sessions: SessionRow[];
+  profile: {
+    bio: string | null;
+    specialties: string[];
+    modalities: string[];
+  };
   attendance: {
     meetings_held: number;
     attended: number;
@@ -33,6 +38,32 @@ interface TherapistDetail {
   };
 }
 
+interface ProfileOption {
+  slug: string;
+  label: string;
+}
+
+const ProfileChips: React.FC<{ title: string; slugs: string[]; labels: Record<string, string> }> = ({
+  title,
+  slugs,
+  labels,
+}) => (
+  <div style={{ marginTop: 14 }}>
+    <div className="mhc-card-label" style={{ marginBottom: 6 }}>{title}</div>
+    {slugs.length === 0 ? (
+      <span className="mhc-card-sub">Nije navedeno.</span>
+    ) : (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {slugs.map((slug) => (
+          <span key={slug} className="mhc-badge" style={{ background: "#eef2ff", color: "#4338ca" }}>
+            {labels[slug] || slug}
+          </span>
+        ))}
+      </div>
+    )}
+  </div>
+);
+
 const AdminTherapistDetail: React.FC = () => {
   const { therapistId } = useParams();
   const navigate = useNavigate();
@@ -40,6 +71,17 @@ const AdminTherapistDetail: React.FC = () => {
   const [data, setData] = useState<TherapistDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [optionLabels, setOptionLabels] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    axios
+      .get(`${backendBase}/tenant/profile-options`)
+      .then((res) => {
+        const all: ProfileOption[] = [...res.data.specialties, ...res.data.modalities];
+        setOptionLabels(Object.fromEntries(all.map((o) => [o.slug, o.label])));
+      })
+      .catch(() => setOptionLabels({}));
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -110,6 +152,19 @@ const AdminTherapistDetail: React.FC = () => {
               <div className="mhc-card-sub">
                 {data.attendance.attended} prisutan / {data.attendance.absent} odsutan / {data.attendance.excused} opravdano
               </div>
+            </div>
+          </div>
+
+          <div className="mhc-panel">
+            <h3 className="mhc-panel-title">Profil terapeuta</h3>
+            <div style={{ padding: "0 4px 4px" }}>
+              {data.profile.bio ? (
+                <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6, margin: 0 }}>{data.profile.bio}</p>
+              ) : (
+                <span className="mhc-card-sub">Terapeut još nije dodao biografiju.</span>
+              )}
+              <ProfileChips title="Oblasti rada" slugs={data.profile.specialties} labels={optionLabels} />
+              <ProfileChips title="Psihoterapijski pravci" slugs={data.profile.modalities} labels={optionLabels} />
             </div>
           </div>
 
