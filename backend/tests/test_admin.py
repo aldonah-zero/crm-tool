@@ -844,10 +844,8 @@ def test_new_registrations_default_to_unapproved(seeded):
     so the frontend can gate access before an admin approves them."""
     resp = client.post(
         "/auth/register-profile",
-        json={
-            "supabase_user_id": "brand-new-sub", "email": "brand-new@example.com",
-            "full_name": "Brand New", "practice_name": "Brand New Practice",
-        },
+        json={"full_name": "Brand New", "practice_name": "Brand New Practice"},
+        headers=_client_token_headers("brand-new-sub", "brand-new@example.com"),
     )
     assert resp.status_code == 200
     assert resp.json()["is_approved"] is False
@@ -1157,3 +1155,101 @@ def test_client_portal_uses_verified_login_not_headers_or_body(seeded):
     # Without a login, a spoofed X-Client-ID gets nothing.
     assert client.get("/client/appointments", headers={"X-Client-ID": str(profile.json()["client_id"])}).status_code == 401
     assert client.get("/client/appointments", headers=headers).status_code == 200
+
+
+# --------------------------------------------------------------------------
+# /auth/* - the account identity comes only from the verified login token,
+# never from supabase_user_id/email in the request body.
+# --------------------------------------------------------------------------
+
+def _profile_row(supabase_user_id: str):
+    db = SessionLocal()
+    try:
+        return db.query(UserProfile).filter(UserProfile.supabase_user_id == supabase_user_id).first()
+    finally:
+        db.close()
+
+
+def test_auth_endpoints_reject_requests_without_login(seeded):
+    assert client.post("/auth/register-profile", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com", "practice_name": "X",
+    }).status_code == 401
+    assert client.post("/auth/login-profile", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com",
+    }).status_code == 401
+    token = main_api.create_invite_token(seeded["tenant_id"])
+    assert client.post("/auth/join-tenant", json={
+        "supabase_user_id": "owner-sub", "email": "owner@example.com", "invite_token": token,
+    }).status_code == 401
+
+
+def test_login_profile_ignores_foreign_uuid_in_body(seeded):
+    """An attacker logged in as themselves puts the admin's UUID in the
+    body - they must get their OWN profile, never the admin's."""
+    resp = client.post(
+        "/auth/login-profile",
+        json={"supabase_user_id": "owner-sub", "email": "owner@example.com"},
+        headers=_client_token_headers("attacker-login-sub", "attacker-login@example.com"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["supabase_user_id"] == "attacker-login-sub"
+    assert body["email"] == "attacker-login@example.com"
+    assert body["tenant_id"] != seeded["tenant_id"]
+    assert body["is_admin"] is False
+
+
+def test_register_profile_ignores_foreign_uuid_in_body(seeded):
+    """Pre-registering a profile under a victim's UUID must not work - the
+    profile is created for the token's account instead."""
+    resp = client.post(
+        "/auth/register-profile",
+        json={"supabase_user_id": "victim-not-yet-registered", "email": "victim@example.com",
+              "practice_name": "Squatted Practice"},
+        headers=_client_token_headers("attacker-register-sub", "attacker-register@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-register-sub"
+    assert resp.json()["email"] == "attacker-register@example.com"
+    assert _profile_row("victim-not-yet-registered") is None
+
+    # And an existing user's UUID in the body doesn't return their profile either.
+    resp = client.post(
+        "/auth/register-profile",
+        json={"supabase_user_id": "owner-sub", "email": "owner@example.com", "practice_name": "X"},
+        headers=_client_token_headers("attacker-register-sub", "attacker-register@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-register-sub"
+    assert resp.json()["email"] != "owner@example.com"
+
+
+def test_join_tenant_ignores_foreign_uuid_in_body(seeded):
+    token = main_api.create_invite_token(seeded["tenant_id"])
+    resp = client.post(
+        "/auth/join-tenant",
+        json={"supabase_user_id": "victim-join-sub", "email": "victim-join@example.com", "invite_token": token},
+        headers=_client_token_headers("attacker-join-sub", "attacker-join@example.com"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["supabase_user_id"] == "attacker-join-sub"
+    assert resp.json()["email"] == "attacker-join@example.com"
+    assert resp.json()["role"] == "member"
+    assert resp.json()["is_approved"] is False
+    assert _profile_row("victim-join-sub") is None
+
+
+def test_login_profile_uses_practice_name_from_signup_metadata(seeded):
+    """Signups that needed email confirmation have no session at signup
+    time, so the practice name is carried in the account's metadata."""
+    payload = {
+        "sub": "metadata-signup-sub", "email": "metadata-signup@example.com",
+        "aud": "authenticated", "role": "authenticated",
+        "user_metadata": {"full_name": "Meta Person", "practice_name": "Meta Practice"},
+        "exp": datetime.utcnow() + timedelta(hours=1),
+    }
+    headers = {"Authorization": f"Bearer {jwt.encode(payload, SECRET, algorithm='HS256')}"}
+    resp = client.post("/auth/login-profile", json={}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["tenant_name"] == "Meta Practice"
+    assert resp.json()["full_name"] == "Meta Person"

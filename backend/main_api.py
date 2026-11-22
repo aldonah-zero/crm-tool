@@ -3769,23 +3769,54 @@ def send_session_reminders(
 from pydantic import BaseModel as PydanticBaseModel
 
 
+# supabase_user_id/email are still accepted in these bodies so older
+# frontends keep working, but they are IGNORED - the account identity
+# always comes from the verified login token (see _verified_identity).
 class RegisterProfileRequest(PydanticBaseModel):
-    supabase_user_id: str
-    email: str
+    supabase_user_id: str | None = None
+    email: str | None = None
     full_name: str | None = None
     practice_name: str
 
 
 class LoginProfileRequest(PydanticBaseModel):
-    supabase_user_id: str
+    supabase_user_id: str | None = None
     email: str | None = None
     full_name: str | None = None
 
 class JoinTenantRequest(PydanticBaseModel):
-    supabase_user_id: str
-    email: str
+    supabase_user_id: str | None = None
+    email: str | None = None
     full_name: str | None = None
     invite_token: str
+
+
+def _verified_identity(request: Request) -> tuple[str, str, dict]:
+    """(supabase_user_id, email, user_metadata) from the verified bearer
+    token - never from the request body, which anyone can fill with
+    someone else's id. Same rule as /client-auth/profile."""
+    claims = get_verified_supabase_claims(request)
+    email = (claims.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=401, detail="Login has no email")
+    metadata = claims.get("user_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return claims["sub"], email, metadata
+
+
+def _profile_payload(profile: "UserProfile", tenant: Optional["Tenant"]) -> dict:
+    return {
+        "user_id": profile.id,
+        "supabase_user_id": profile.supabase_user_id,
+        "email": profile.email,
+        "full_name": profile.full_name,
+        "role": profile.role,
+        "is_admin": profile.is_admin,
+        "is_approved": profile.is_approved,
+        "tenant_id": profile.tenant_id,
+        "tenant_name": tenant.name if tenant else "",
+    }
 
 
 def create_invite_token(tenant_id: int) -> str:
@@ -3820,26 +3851,19 @@ def verify_invite_token(token: str) -> int:
 @app.post("/auth/register-profile", tags=["Auth"])
 def register_profile(
         data: RegisterProfileRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """After Supabase signup, create a new tenant + user_profile."""
-    existing = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
-    ).first()
+    """After Supabase signup, create a new tenant + user_profile for the
+    caller identified by the verified login token."""
+    supabase_user_id, email, metadata = _verified_identity(request)
 
+    existing = database.query(UserProfile).filter(
+        UserProfile.supabase_user_id == supabase_user_id
+    ).first()
     if existing:
         tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
-        return {
-            "user_id": existing.id,
-            "supabase_user_id": existing.supabase_user_id,
-            "email": existing.email,
-            "full_name": existing.full_name,
-            "role": existing.role,
-            "is_admin": existing.is_admin,
-            "is_approved": existing.is_approved,
-            "tenant_id": existing.tenant_id,
-            "tenant_name": tenant.name if tenant else ""
-        }
+        return _profile_payload(existing, tenant)
 
     new_tenant = Tenant(
         name=data.practice_name,
@@ -3853,9 +3877,9 @@ def register_profile(
     # UserProfile.is_admin) granted only via BOOTSTRAP_ADMIN_EMAIL or by
     # an existing admin promoting someone through the admin area.
     new_profile = UserProfile(
-        supabase_user_id=data.supabase_user_id,
-        email=data.email,
-        full_name=data.full_name,
+        supabase_user_id=supabase_user_id,
+        email=email,
+        full_name=data.full_name or metadata.get("full_name"),
         role="owner",
         tenant_id=new_tenant.id
     )
@@ -3863,39 +3887,37 @@ def register_profile(
     database.commit()
     database.refresh(new_profile)
 
-    return {
-        "user_id": new_profile.id,
-        "supabase_user_id": new_profile.supabase_user_id,
-        "email": new_profile.email,
-        "full_name": new_profile.full_name,
-        "role": new_profile.role,
-        "is_admin": new_profile.is_admin,
-        "is_approved": new_profile.is_approved,
-        "tenant_id": new_tenant.id,
-        "tenant_name": new_tenant.name
-    }
+    return _profile_payload(new_profile, new_tenant)
 
 
 @app.post("/auth/login-profile", tags=["Auth"])
 def login_profile(
         data: LoginProfileRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """After Supabase login, look up user_profile and return tenant_id."""
+    """After Supabase login, look up the caller's user_profile (identified
+    by the verified login token) and return tenant_id."""
+    supabase_user_id, email, metadata = _verified_identity(request)
+
     profile = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
+        UserProfile.supabase_user_id == supabase_user_id
     ).first()
 
     if not profile:
-        tenant = Tenant(name="Default", trial_ends_at=datetime.utcnow() + timedelta(days=30))
+        # A signup that needed email confirmation had no session yet, so
+        # the practice name was stashed in the account's metadata instead
+        # (see signUp in AuthContext.tsx).
+        practice_name = (metadata.get("practice_name") or "").strip() or "Default"
+        tenant = Tenant(name=practice_name, trial_ends_at=datetime.utcnow() + timedelta(days=30))
         database.add(tenant)
         database.flush()
 
         # See register_profile above - is_admin is never granted automatically.
         profile = UserProfile(
-            supabase_user_id=data.supabase_user_id,
-            email=data.email,
-            full_name=data.full_name,
+            supabase_user_id=supabase_user_id,
+            email=email,
+            full_name=data.full_name or metadata.get("full_name") or metadata.get("name"),
             role="owner",
             tenant_id=tenant.id
         )
@@ -3905,44 +3927,26 @@ def login_profile(
         database.refresh(profile)
     tenant = database.query(Tenant).filter(Tenant.id == profile.tenant_id).first()
 
-    return {
-        "user_id": profile.id,
-        "supabase_user_id": profile.supabase_user_id,
-        "email": profile.email,
-        "full_name": profile.full_name,
-        "role": profile.role,
-        "is_admin": profile.is_admin,
-        "is_approved": profile.is_approved,
-        "tenant_id": profile.tenant_id,
-        "tenant_name": tenant.name if tenant else ""
-    }
+    return _profile_payload(profile, tenant)
 
 
 @app.post("/auth/join-tenant", tags=["Auth"])
 def join_tenant(
         data: JoinTenantRequest,
+        request: Request,
         database: Session = Depends(get_db)
 ):
-    """New user joins an existing tenant via a signed team-invite link."""
+    """The logged-in caller (verified token) joins an existing tenant via
+    a signed team-invite link."""
+    supabase_user_id, email, metadata = _verified_identity(request)
     tenant_id = verify_invite_token(data.invite_token)
 
     existing = database.query(UserProfile).filter(
-        UserProfile.supabase_user_id == data.supabase_user_id
+        UserProfile.supabase_user_id == supabase_user_id
     ).first()
-
     if existing:
         tenant = database.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
-        return {
-            "user_id": existing.id,
-            "supabase_user_id": existing.supabase_user_id,
-            "email": existing.email,
-            "full_name": existing.full_name,
-            "role": existing.role,
-            "is_admin": existing.is_admin,
-            "is_approved": existing.is_approved,
-            "tenant_id": existing.tenant_id,
-            "tenant_name": tenant.name if tenant else ""
-        }
+        return _profile_payload(existing, tenant)
 
     tenant = database.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -3951,9 +3955,9 @@ def join_tenant(
     # Invited members are never admins by default (is_admin stays False) -
     # an existing admin has to promote them explicitly via the admin area.
     new_profile = UserProfile(
-        supabase_user_id=data.supabase_user_id,
-        email=data.email,
-        full_name=data.full_name,
+        supabase_user_id=supabase_user_id,
+        email=email,
+        full_name=data.full_name or metadata.get("full_name") or metadata.get("name"),
         role="member",
         tenant_id=tenant_id
     )
@@ -3961,17 +3965,7 @@ def join_tenant(
     database.commit()
     database.refresh(new_profile)
 
-    return {
-        "user_id": new_profile.id,
-        "supabase_user_id": new_profile.supabase_user_id,
-        "email": new_profile.email,
-        "full_name": new_profile.full_name,
-        "role": new_profile.role,
-        "is_admin": new_profile.is_admin,
-        "is_approved": new_profile.is_approved,
-        "tenant_id": new_profile.tenant_id,
-        "tenant_name": tenant.name
-    }
+    return _profile_payload(new_profile, tenant)
 
 
 @app.get("/auth/invite-link", tags=["Auth"])
