@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { SPECIALTY_TAGS } from "../lib/specialtyTags";
 import AvatarUpload from "./AvatarUpload";
 
 const backendBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -23,6 +22,69 @@ interface DayHours {
 
 type WorkingHours = Record<string, DayHours>;
 
+interface ProfileOption {
+  slug: string;
+  label: string;
+}
+
+interface ProfileOptions {
+  specialties: ProfileOption[];
+  modalities: ProfileOption[];
+  bio_max_length: number;
+}
+
+const toggleIn = (list: string[], slug: string) =>
+  list.includes(slug) ? list.filter((t) => t !== slug) : [...list, slug];
+
+const ChipGroup: React.FC<{
+  options: ProfileOption[];
+  selected: string[];
+  onToggle: (slug: string) => void;
+}> = ({ options, selected, onToggle }) => (
+  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 24 }}>
+    {options.map((tag) => {
+      const active = selected.includes(tag.slug);
+      return (
+        <button
+          key={tag.slug}
+          type="button"
+          aria-pressed={active}
+          onClick={() => onToggle(tag.slug)}
+          style={{
+            padding: "7px 14px",
+            borderRadius: 20,
+            border: active ? "1.5px solid #6366f1" : "1.5px solid #e2e8f0",
+            background: active ? "#6366f1" : "#fff",
+            color: active ? "#fff" : "#334155",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            fontFamily: "inherit",
+            boxShadow: active ? "0 4px 12px rgba(99,102,241,0.3)" : "none",
+            transition: "all 0.18s ease",
+          }}
+        >
+          {tag.label}
+        </button>
+      );
+    })}
+  </div>
+);
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 600,
+  color: "#334155",
+  display: "block",
+  marginBottom: 8,
+};
+
+const hintStyle: React.CSSProperties = {
+  margin: "-4px 0 10px",
+  fontSize: 12,
+  color: "#64748b",
+};
+
 const defaultWorkingHours = (): WorkingHours =>
   Object.fromEntries(
     WEEKDAYS.map((d) => [
@@ -35,6 +97,13 @@ const ClientProfileSettings: React.FC = () => {
   const [practiceName, setPracticeName] = useState("");
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [specialties, setSpecialties] = useState<string[]>([]);
+  const [modalities, setModalities] = useState<string[]>([]);
+  const [bio, setBio] = useState("");
+  const [options, setOptions] = useState<ProfileOptions>({
+    specialties: [],
+    modalities: [],
+    bio_max_length: 2000,
+  });
   const [workingHours, setWorkingHours] = useState<WorkingHours>(
     defaultWorkingHours(),
   );
@@ -49,10 +118,19 @@ const ClientProfileSettings: React.FC = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await axios.get(`${backendBase}/tenant/settings`);
+        const [res, opts] = await Promise.all([
+          axios.get(`${backendBase}/tenant/settings`),
+          axios.get(`${backendBase}/tenant/profile-options`),
+        ]);
+        setOptions(opts.data);
         setPracticeName(res.data.name || "");
         setPhotoUrl(res.data.photo_url || null);
-        setSpecialties(res.data.specialties || []);
+        setBio(res.data.bio || "");
+        // Drop anything no longer in the catalog so saving doesn't fail.
+        const known = (list: string[] | undefined, catalog: ProfileOption[]) =>
+          (list || []).filter((s) => catalog.some((o) => o.slug === s));
+        setSpecialties(known(res.data.specialties, opts.data.specialties));
+        setModalities(known(res.data.modalities, opts.data.modalities));
         if (
           res.data.working_hours &&
           Object.keys(res.data.working_hours).length > 0
@@ -71,12 +149,6 @@ const ClientProfileSettings: React.FC = () => {
     load();
   }, []);
 
-  const toggleTag = (slug: string) => {
-    setSpecialties((prev) =>
-      prev.includes(slug) ? prev.filter((t) => t !== slug) : [...prev, slug],
-    );
-  };
-
   const updateDay = (key: string, patch: Partial<DayHours>) => {
     setWorkingHours((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   };
@@ -88,14 +160,20 @@ const ClientProfileSettings: React.FC = () => {
       await axios.put(`${backendBase}/tenant/settings`, {
         name: practiceName.trim() || null,
         specialties,
+        modalities,
+        bio,
         working_hours: workingHours,
         default_price: defaultPrice ? Number(defaultPrice) : null,
         photo_url: photoUrl || "",
       });
       setMessage({ text: "Sačuvano!", type: "success" });
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error saving tenant settings:", err);
-      setMessage({ text: "Greška pri čuvanju.", type: "error" });
+      const detail = err?.response?.data?.message;
+      setMessage({
+        text: typeof detail === "string" ? detail : "Greška pri čuvanju.",
+        type: "error",
+      });
     } finally {
       setSaving(false);
       setTimeout(() => setMessage(null), 3000);
@@ -146,12 +224,12 @@ const ClientProfileSettings: React.FC = () => {
               color: "#0f172a",
             }}
           >
-            Vaš profil za klijente
+            Vaš profil
           </h3>
-          <p style={{ margin: 0, fontSize: 13, color: "#64748b", maxWidth: 420 }}>
-            Ovo određuje da li i kada se vaša praksa pojavljuje u pretrazi
-            "Pronađi terapeuta" za nove klijente. Slika se prikazuje uz vaše
-            ime u rezultatima pretrage.
+          <p style={{ margin: 0, fontSize: 13, color: "#64748b", maxWidth: 440 }}>
+            Biografiju, oblasti rada i pravce vidi administrator centra kada
+            novim klijentima dodeljuje terapeuta. Slika i naziv prakse
+            prikazuju se klijentima uz njihove termine.
           </p>
         </div>
       </div>
@@ -165,12 +243,12 @@ const ClientProfileSettings: React.FC = () => {
           marginBottom: 8,
         }}
       >
-        Naziv prakse (ovo klijenti vide u pretrazi)
+        Naziv prakse
       </label>
       <input
         value={practiceName}
         onChange={(e) => setPracticeName(e.target.value)}
-        placeholder="Maja's Praksa"
+        placeholder="npr. Psihoterapija Petrović"
         style={{
           width: "100%",
           maxWidth: 320,
@@ -196,51 +274,63 @@ const ClientProfileSettings: React.FC = () => {
         }}
       />
 
-      <label
-        style={{
-          fontSize: 13,
-          fontWeight: 600,
-          color: "#334155",
-          display: "block",
-          marginBottom: 8,
-        }}
-      >
-        Oblasti kojima se bavite
+      <label htmlFor="therapist-bio" style={labelStyle}>
+        Biografija
       </label>
+      <p style={hintStyle}>
+        Obrazovanje, edukacije i sertifikati, iskustvo i način na koji radite.
+      </p>
+      <textarea
+        id="therapist-bio"
+        value={bio}
+        maxLength={options.bio_max_length}
+        onChange={(e) => setBio(e.target.value)}
+        rows={7}
+        placeholder="npr. Diplomirani psiholog, psihoterapeut pod supervizijom u KBT edukaciji. Radim sa odraslima koji se suočavaju sa anksioznošću i depresijom..."
+        style={{
+          width: "100%",
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: "1.5px solid #e2e8f0",
+          fontSize: 13,
+          lineHeight: 1.55,
+          color: "#1e293b",
+          background: "#f8fafc",
+          boxSizing: "border-box",
+          display: "block",
+          resize: "vertical",
+          fontFamily: "inherit",
+          outline: "none",
+        }}
+      />
       <div
         style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          marginBottom: 24,
+          textAlign: "right",
+          fontSize: 11,
+          color: bio.length >= options.bio_max_length ? "#ef4444" : "#94a3b8",
+          margin: "4px 0 24px",
         }}
       >
-        {SPECIALTY_TAGS.map((tag) => {
-          const active = specialties.includes(tag.slug);
-          return (
-            <button
-              key={tag.slug}
-              type="button"
-              onClick={() => toggleTag(tag.slug)}
-              style={{
-                padding: "7px 14px",
-                borderRadius: 20,
-                border: active ? "1.5px solid #6366f1" : "1.5px solid #e2e8f0",
-                background: active ? "#6366f1" : "#fff",
-                color: active ? "#fff" : "#334155",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                fontFamily: "inherit",
-                boxShadow: active ? "0 4px 12px rgba(99,102,241,0.3)" : "none",
-                transition: "all 0.18s ease",
-              }}
-            >
-              {tag.label}
-            </button>
-          );
-        })}
+        {bio.length} / {options.bio_max_length}
       </div>
+
+      <label style={labelStyle}>Oblasti rada</label>
+      <p style={hintStyle}>Teškoće i populacije sa kojima radite.</p>
+      <ChipGroup
+        options={options.specialties}
+        selected={specialties}
+        onToggle={(slug) => setSpecialties((prev) => toggleIn(prev, slug))}
+      />
+
+      <label style={labelStyle}>Psihoterapijski pravci</label>
+      <p style={hintStyle}>
+        Pravci u kojima ste edukovani ili koje primenjujete u radu.
+      </p>
+      <ChipGroup
+        options={options.modalities}
+        selected={modalities}
+        onToggle={(slug) => setModalities((prev) => toggleIn(prev, slug))}
+      />
 
       <label
         style={{

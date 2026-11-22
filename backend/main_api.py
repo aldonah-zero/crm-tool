@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker, selectinload, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError, ProgrammingError
 from pydantic_classes import *
 from sql_alchemy import *
+import therapist_profile_options as profile_options
 import io
 import csv
 import codecs
@@ -114,6 +115,8 @@ def run_light_migrations(engine):
         "ALTER TABLE tenant ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE tenant ADD COLUMN subscription_paid_until TIMESTAMP",
         "ALTER TABLE tenant ADD COLUMN photo_url TEXT",
+        "ALTER TABLE tenant ADD COLUMN bio TEXT",
+        "ALTER TABLE tenant ADD COLUMN modalities TEXT",
         "ALTER TABLE client_account ADD COLUMN photo_url TEXT",
         # Admin area (Mental Health Center management)
         "ALTER TABLE user_profile ADD COLUMN active BOOLEAN DEFAULT TRUE",
@@ -234,6 +237,24 @@ def run_light_migrations(engine):
                 conn.commit()
             except (OperationalError, ProgrammingError):
                 conn.rollback()
+
+        # Specialty categories moved from lay terms ("slomljeno srce") to
+        # professional ones - remap stored slugs (idempotent: rows already
+        # on the new catalog come out unchanged and aren't rewritten).
+        try:
+            rows = conn.execute(text(
+                "SELECT id, specialties FROM tenant WHERE specialties IS NOT NULL AND specialties <> ''"
+            )).fetchall()
+            for tenant_id, stored in rows:
+                migrated = profile_options.migrate_legacy_specialties(stored)
+                if migrated != stored:
+                    conn.execute(
+                        text("UPDATE tenant SET specialties = :s WHERE id = :id"),
+                        {"s": migrated, "id": tenant_id},
+                    )
+            conn.commit()
+        except (OperationalError, ProgrammingError):
+            conn.rollback()
 
         # Historical clients/sessions predate the therapist_id column, so
         # they're unassigned by default - which starved the leaderboards
@@ -3158,20 +3179,60 @@ def _validate_photo_url(photo_url: str | None) -> None:
 class TenantSettingsUpdate(BaseModel):
     name: str | None = None
     specialties: list[str] | None = None
+    modalities: list[str] | None = None
+    bio: str | None = None
     working_hours: dict | None = None
     default_price: float | None = None
     photo_url: str | None = None
+
+
+def _split_slugs(value: str | None) -> list[str]:
+    return [s for s in (value or "").split(",") if s]
+
+
+def _clean_slug_list(values: list[str], allowed: set, what: str) -> str:
+    """Validates a list of catalog slugs (see therapist_profile_options.py)
+    and returns it de-duplicated, in the submitted order, as stored text."""
+    cleaned = []
+    for v in values:
+        slug = (v or "").strip()
+        if not slug:
+            continue
+        if slug not in allowed:
+            raise HTTPException(status_code=400, detail=f"Nepoznata vrednost za {what}: {slug}")
+        if slug not in cleaned:
+            cleaned.append(slug)
+    return ",".join(cleaned)
+
+
+def _therapist_profile_payload(tenant: Optional[Tenant]) -> dict:
+    """The parts of a practice's settings that describe the therapist."""
+    if not tenant:
+        return {"bio": None, "specialties": [], "modalities": []}
+    return {
+        "bio": tenant.bio,
+        "specialties": _split_slugs(tenant.specialties),
+        "modalities": _split_slugs(tenant.modalities),
+    }
 
 
 def _tenant_settings_payload(tenant: Tenant) -> dict:
     return {
         "tenant_id": tenant.id,
         "name": tenant.name,
-        "specialties": tenant.specialties.split(",") if tenant.specialties else [],
+        **_therapist_profile_payload(tenant),
         "working_hours": json.loads(tenant.working_hours) if tenant.working_hours else {},
         "default_price": tenant.default_price,
         "photo_url": tenant.photo_url,
     }
+
+
+@app.get("/tenant/profile-options", tags=["Tenant"])
+def get_profile_options(
+        tenant_id: int = Depends(get_tenant_id),
+):
+    """The catalog of areas/modalities a therapist can pick from."""
+    return profile_options.options_payload()
 
 
 @app.get("/tenant/settings", tags=["Tenant"])
@@ -3198,7 +3259,17 @@ def update_tenant_settings(
     if data.name is not None and data.name.strip():
         tenant.name = data.name.strip()
     if data.specialties is not None:
-        tenant.specialties = ",".join(s.strip() for s in data.specialties if s.strip())
+        tenant.specialties = _clean_slug_list(data.specialties, profile_options.SPECIALTY_SLUGS, "oblast rada")
+    if data.modalities is not None:
+        tenant.modalities = _clean_slug_list(data.modalities, profile_options.MODALITY_SLUGS, "psihoterapijski pravac")
+    if data.bio is not None:
+        bio = data.bio.strip()
+        if len(bio) > profile_options.BIO_MAX_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Biografija može imati najviše {profile_options.BIO_MAX_LENGTH} karaktera.",
+            )
+        tenant.bio = bio or None
     if data.working_hours is not None:
         tenant.working_hours = json.dumps(data.working_hours)
     if data.default_price is not None:
@@ -4493,8 +4564,11 @@ def admin_get_therapist(
     absent = len([r for r in records if r.status == "absent"])
     excused = len([r for r in records if r.status == "excused"])
 
+    therapist_tenant = database.query(Tenant).filter(Tenant.id == therapist.tenant_id).first()
+
     return {
         **stats,
+        "profile": _therapist_profile_payload(therapist_tenant),
         "clients": [_klijent_payload(c) for c in clients],
         "recent_sessions": [_sesija_admin_payload(s) for s in sessions],
         "attendance": {

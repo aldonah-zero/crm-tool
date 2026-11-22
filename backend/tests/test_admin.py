@@ -1382,3 +1382,114 @@ def test_sliding_window_limiter_allows_again_after_window(monkeypatch):
     assert limiter.hit("k") == 61
     clock[0] += 61
     assert limiter.hit("k") is None
+
+
+# --------------------------------------------------------------------------
+# Therapist profile: biography, professional areas, psychotherapy modalities
+# --------------------------------------------------------------------------
+
+import therapist_profile_options as profile_options
+
+
+def test_profile_options_catalog_requires_login_and_lists_both_catalogs(seeded):
+    assert client.get("/tenant/profile-options").status_code == 401
+    resp = client.get("/tenant/profile-options", headers=auth_headers("member-sub"))
+    assert resp.status_code == 200
+    body = resp.json()
+    spec = {o["slug"] for o in body["specialties"]}
+    mods = {o["slug"] for o in body["modalities"]}
+    assert {"okp", "ptsp-trauma", "zalovanje"} <= spec
+    assert {"kbt", "psihodinamska", "gestalt", "sistemska-porodicna", "emdr"} <= mods
+    assert body["bio_max_length"] == profile_options.BIO_MAX_LENGTH
+
+
+def test_therapist_can_save_bio_specialties_and_modalities(seeded):
+    headers = auth_headers("other-owner-sub")
+    db = SessionLocal()
+    try:
+        db.query(UserProfile).filter(UserProfile.supabase_user_id == "other-owner-sub").update({"is_approved": True})
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.put("/tenant/settings", headers=headers, json={
+        "bio": "  Psiholog i KBT psihoterapeut sa 10 godina iskustva.\nRadim sa odraslima.  ",
+        "specialties": ["depresija", "okp", "depresija"],
+        "modalities": ["kbt", "emdr"],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bio"] == "Psiholog i KBT psihoterapeut sa 10 godina iskustva.\nRadim sa odraslima."
+    assert body["specialties"] == ["depresija", "okp"]
+    assert body["modalities"] == ["kbt", "emdr"]
+
+    again = client.get("/tenant/settings", headers=headers).json()
+    assert again["bio"].startswith("Psiholog")
+    assert again["modalities"] == ["kbt", "emdr"]
+
+    # Sending an empty bio clears it; omitting fields leaves them alone.
+    cleared = client.put("/tenant/settings", headers=headers, json={"bio": "   "}).json()
+    assert cleared["bio"] is None
+    assert cleared["modalities"] == ["kbt", "emdr"]
+
+
+def test_unknown_profile_values_and_too_long_bio_are_rejected(seeded):
+    headers = auth_headers("owner-sub")
+    assert client.put("/tenant/settings", headers=headers,
+                      json={"specialties": ["slomljeno-srce"]}).status_code == 400
+    assert client.put("/tenant/settings", headers=headers,
+                      json={"modalities": ["astrologija"]}).status_code == 400
+    too_long = "a" * (profile_options.BIO_MAX_LENGTH + 1)
+    assert client.put("/tenant/settings", headers=headers, json={"bio": too_long}).status_code == 400
+
+
+def test_admin_sees_therapist_profile_on_detail_page(seeded):
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == seeded["tenant_id"]).first()
+        tenant.bio = "Bio za admina"
+        tenant.specialties = "ptsp-trauma"
+        tenant.modalities = "gestalt"
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get(f"/admin/therapists/{seeded['member_id']}", headers=auth_headers("owner-sub"))
+    assert resp.status_code == 200
+    assert resp.json()["profile"] == {"bio": "Bio za admina", "specialties": ["ptsp-trauma"], "modalities": ["gestalt"]}
+
+
+def test_legacy_lay_categories_map_to_professional_ones():
+    migrate = profile_options.migrate_legacy_specialties
+    assert migrate("slomljeno-srce,nevernost,anksioznost,nesanica") == \
+        "partnerski-odnosi,anksiozni-poremecaji,poremecaji-spavanja"
+    assert migrate("usamljenost,depresija") == "depresija"   # no clinical equivalent -> dropped
+    already = "okp,depresija"
+    assert migrate(already) == already                       # idempotent
+    assert migrate(None) is None and migrate("") == ""
+
+
+def test_catalog_slugs_are_unique():
+    for catalog in (profile_options.THERAPIST_SPECIALTIES, profile_options.THERAPY_MODALITIES):
+        slugs = [s for s, _ in catalog]
+        assert len(slugs) == len(set(slugs))
+    assert set(profile_options.LEGACY_SPECIALTY_MAP.values()) <= profile_options.SPECIALTY_SLUGS
+
+
+def test_startup_migration_rewrites_stored_legacy_specialties():
+    db = SessionLocal()
+    try:
+        legacy = Tenant(name="Legacy Tags Practice", specialties="trauma,problemi-u-vezi,usamljenost")
+        db.add(legacy)
+        db.commit()
+        legacy_id = legacy.id
+    finally:
+        db.close()
+
+    main_api.run_light_migrations(_engine)
+
+    db = SessionLocal()
+    try:
+        assert db.query(Tenant).filter(Tenant.id == legacy_id).first().specialties == "ptsp-trauma,partnerski-odnosi"
+    finally:
+        db.close()
